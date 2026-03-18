@@ -1,0 +1,70 @@
+project_name: "qwen3_dinov3_modular_vlm"
+seed: 42
+
+model:
+  vision_backbone: "/home/user/Project_files/project/local_models/dinov3_vit"
+  vision_source: "torch_hub"
+  vision_repo: "facebookresearch/dinov3"
+  vision_model_name: "dinov3_vitl16"
+  alignment_head: "dinotxt_projection"
+  alignment_head_weights: "/home/user/Project_files/project/pth/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth"
+  llm_base: "/home/user/Project_files/project/local_models/qwen3-vl-4b"
+  freeze_strategy:
+    - "vision_backbone"
+    - "alignment_head"
+    - "llm_base"
+  trainable_modules:
+    - "adapter"
+  hidden_size_qwen: 4096
+  embed_dim_dino: 1024
+  alignment_dim: 1024
+  adapter_dropout: 0.0
+
+data:
+  unified_root: "/data1/staging_datasets/unified_vqa"
+  train_manifest: "/data1/staging_datasets/unified_vqa/manifests/merged/train.jsonl"
+  val_manifest: null
+  test_manifest: "/data1/staging_datasets/unified_vqa/manifests/merged/test.jsonl"
+  summary_path: "/data1/staging_datasets/unified_vqa/manifests/summary.json"
+  image_root: null
+  image_size: 448
+  max_text_length: 512
+  num_workers: 4
+
+training:
+  active_phase: "phase1"
+  output_dir: "./outputs/qwen3_dinov3"
+  batch_size: 2
+  num_epochs: 1
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 100
+  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0
+  mixed_precision: "bf16"
+  log_every: 10
+  save_every: 1000
+  device: "cuda"
+  phases:
+    phase1:
+      name: "adapter_warmup"
+      freeze_modules:
+        - "vision_backbone"
+        - "alignment_head"
+        - "llm_base"
+      trainable_modules:
+        - "adapter"
+      llm_tune_last_n_layers: 0
+      learning_rate: 1.0e-4
+      weight_decay: 0.01
+    phase2:
+      name: "optional_partial_llm_finetune"
+      freeze_modules:
+        - "vision_backbone"
+        - "alignment_head"
+      trainable_modules:
+        - "adapter"
+        - "llm_last_layers"
+      llm_tune_last_n_layers: 2
+      learning_rate: 5.0e-5
+      weight_decay: 0.01
