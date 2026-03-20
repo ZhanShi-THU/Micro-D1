@@ -1,0 +1,4 @@
+sample_id,source_dataset,split,question,correct_index,modular_pred,baseline_pred,modular_response,baseline_response,modular_correct,baseline_correct
+microbench_bc763893-24e8-4271-9e60-34c454ec5ba1_classification,microbench,test,"A brightfield micrograph of jurkat cells acquired using flow cytometry (single cell). Based on the micrograph, what is the most likely cell phase?",2,,,"Based on the image, what is the correct answer to the question ""What is the stage of the cell cycle?","To determine the most likely cell phase from the brightfield micrograph of Jurkat cells acquired using flow cytometry, we need to consider the characteristics of the image and the typical appearance of cells in different phases of the cell cycle.
+
+Flow cytometry is a technique used to analyze the cell cycle and detect the presence of specific",False,False

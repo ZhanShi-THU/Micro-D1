@@ -17,7 +17,11 @@ The model is intentionally modular:
 - A DINOv3 vision backbone extracts patch tokens.
 - A DINOText-style alignment head maps visual features into an aligned token space.
 - A lightweight trainable adapter projects aligned visual tokens into the Qwen embedding space.
-- A Qwen3-VL causal decoder consumes visual tokens as a prefix sequence followed by text tokens.
+- The Qwen3-VL text backbone consumes visual tokens as a prefix sequence followed by text tokens.
+
+The project does not use the official Qwen3-VL vision tower in the modular path. It uses only the Qwen3-VL text embeddings, decoder stack, and language head.
+
+For a shape-by-shape walkthrough of the full image/text pipeline, see [`ARCHITECTURE_DATAFLOW.md`](/home/user/Project_files/project/ARCHITECTURE_DATAFLOW.md).
 
 The training target is multiple-choice VQA in the format:
 
@@ -113,8 +117,8 @@ Minimal Python dependencies are listed in [`requirements.txt`](/home/user/Projec
 
 The default config expects:
 
-- Qwen3-VL at [`local_models/qwen3-vl-4b`](/home/user/Project_files/project/local_models/qwen3-vl-4b)
-- DINOv3 at [`local_models/dinov3_vit`](/home/user/Project_files/project/local_models)
+- Qwen3-VL at [`local_models/qwen3-vl-8b`](/home/user/Project_files/project/local_models/qwen3-vl-8b)
+- DINOv3 backbone checkpoint at [`pth/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth`](/home/user/Project_files/project/pth/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth)
 - DINOText alignment weights at [`pth/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth`](/home/user/Project_files/project/pth/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth)
 
 To prepare local model paths:
@@ -127,7 +131,7 @@ conda run -n microvqa python scripts/deploy_local_models.py
 By default this script:
 
 - symlinks DINOv3 from `/home/user/Project_files/microvqa/models/dinov3_vit`
-- downloads Qwen3-VL-4B-Instruct into `local_models/qwen3-vl-4b`
+- downloads Qwen3-VL-8B-Instruct into `local_models/qwen3-vl-8b`
 
 ## Data Preparation
 

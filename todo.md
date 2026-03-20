@@ -1,0 +1,1 @@
+dinov3的图片端，patch16的基础上，resize为448，可能需要改成自适应padding为16倍数

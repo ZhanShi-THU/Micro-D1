@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForImageTextToText
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from models.adapter import VisualAdapter
@@ -29,12 +30,44 @@ class ModularVLM(nn.Module):
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__()
-        model_cfg = config["model"]
+        model_cfg = dict(config["model"])
+        self.model_cfg = model_cfg
+        self.config = config
+
+        vision_backbone = model_cfg.get("vision_backbone") or model_cfg.get(
+            "vision_model_name",
+            "dinov3_vitl16",
+        )
+        model_cfg["vision_backbone"] = vision_backbone
+
+        llm_local_only = Path(model_cfg["llm_base"]).exists()
+        llm_config = AutoConfig.from_pretrained(
+            model_cfg["llm_base"],
+            trust_remote_code=True,
+            local_files_only=llm_local_only,
+        )
+        self.hidden_size_qwen = self._resolve_llm_hidden_size(llm_config)
+        configured_hidden_size = model_cfg.get("hidden_size_qwen")
+        if configured_hidden_size is None:
+            model_cfg["hidden_size_qwen"] = self.hidden_size_qwen
+        elif int(configured_hidden_size) != self.hidden_size_qwen:
+            raise ValueError(
+                "hidden_size_qwen does not match the loaded Qwen3-VL text hidden size: "
+                f"config={configured_hidden_size}, model={self.hidden_size_qwen}"
+            )
+
+        embed_dim_dino = int(model_cfg["embed_dim_dino"])
+        alignment_dim = int(model_cfg["alignment_dim"])
+        if embed_dim_dino != alignment_dim:
+            raise ValueError(
+                "DINO/dinotxt dimensions must match for the current alignment head: "
+                f"embed_dim_dino={embed_dim_dino}, alignment_dim={alignment_dim}"
+            )
 
         self.vision_encoder = VisionEncoder(
-            backbone_name=model_cfg["vision_backbone"],
-            embed_dim_dino=model_cfg["embed_dim_dino"],
-            alignment_dim=model_cfg["alignment_dim"],
+            backbone_name=vision_backbone,
+            embed_dim_dino=embed_dim_dino,
+            alignment_dim=alignment_dim,
             alignment_head_weights=model_cfg.get("alignment_head_weights"),
             vision_source=model_cfg.get("vision_source", "torch_hub"),
             vision_repo=model_cfg.get("vision_repo", "facebookresearch/dinov3"),
@@ -43,13 +76,16 @@ class ModularVLM(nn.Module):
             vision_checkpoint_path=model_cfg.get("vision_checkpoint_path"),
         )
         self.adapter = VisualAdapter(
-            input_dim=model_cfg["alignment_dim"],
-            output_dim=model_cfg["hidden_size_qwen"],
+            input_dim=alignment_dim,
+            output_dim=self.hidden_size_qwen,
             dropout=model_cfg.get("adapter_dropout", 0.0),
         )
-        self.llm = AutoModelForCausalLM.from_pretrained(
+        llm_dtype = self._resolve_llm_dtype(config)
+        self.llm = AutoModelForImageTextToText.from_pretrained(
             model_cfg["llm_base"],
             trust_remote_code=True,
+            local_files_only=llm_local_only,
+            dtype=llm_dtype,
         )
         self.llm_body = self._resolve_llm_body(self.llm)
         self.lm_head = self._resolve_lm_head(self.llm)
@@ -59,7 +95,35 @@ class ModularVLM(nn.Module):
             trainable_modules=model_cfg.get("trainable_modules", ["adapter"]),
         )
 
+    def _resolve_llm_hidden_size(self, llm_config: Any) -> int:
+        text_config = getattr(llm_config, "text_config", None)
+        if text_config is not None and getattr(text_config, "hidden_size", None) is not None:
+            return int(text_config.hidden_size)
+        if getattr(llm_config, "hidden_size", None) is not None:
+            return int(llm_config.hidden_size)
+        raise ValueError("Unable to determine the Qwen3-VL text hidden size from config.")
+
+    def _resolve_llm_dtype(self, config: Dict[str, Any]) -> torch.dtype | None:
+        explicit_dtype = str(self.model_cfg.get("llm_dtype", "")).lower()
+        if explicit_dtype:
+            if explicit_dtype == "bf16":
+                return torch.bfloat16
+            if explicit_dtype == "fp16":
+                return torch.float16
+            if explicit_dtype in {"fp32", "float32"}:
+                return torch.float32
+            raise ValueError(f"Unsupported llm_dtype: {self.model_cfg['llm_dtype']}")
+
+        mixed_precision = str(config.get("training", {}).get("mixed_precision", "none")).lower()
+        if mixed_precision == "bf16":
+            return torch.bfloat16
+        if mixed_precision == "fp16":
+            return torch.float16
+        return None
+
     def _resolve_llm_body(self, llm: nn.Module) -> nn.Module:
+        if hasattr(llm, "model") and hasattr(llm.model, "language_model"):
+            return llm.model.language_model
         if hasattr(llm, "model"):
             return llm.model
         if hasattr(llm, "get_base_model"):
@@ -103,6 +167,9 @@ class ModularVLM(nn.Module):
     def get_visual_embeds(self, pixel_values: torch.Tensor) -> torch.Tensor:
         aligned_tokens = self.vision_encoder(pixel_values)
         visual_embeds = self.adapter(aligned_tokens)
+        llm_embed_dtype = self.llm.get_input_embeddings().weight.dtype
+        if visual_embeds.dtype != llm_embed_dtype:
+            visual_embeds = visual_embeds.to(llm_embed_dtype)
         return visual_embeds
 
     def get_text_embeds(self, input_ids: torch.Tensor) -> torch.Tensor:

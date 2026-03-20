@@ -170,12 +170,18 @@ class VisionEncoder(nn.Module):
         self.backbone_name = backbone_name
         self.embed_dim_dino = embed_dim_dino
         self.alignment_dim = alignment_dim
+        if embed_dim_dino != alignment_dim:
+            raise ValueError(
+                "The current dinotxt head expects equal DINO and alignment dimensions: "
+                f"embed_dim_dino={embed_dim_dino}, alignment_dim={alignment_dim}"
+            )
         self.backbone = self._build_backbone(
             source=vision_source,
             repo=vision_repo,
             model_name=vision_model_name,
             pretrained=vision_pretrained,
         )
+        self._validate_backbone_hidden_size()
         if vision_checkpoint_path:
             checkpoint_path = Path(vision_checkpoint_path)
             if not checkpoint_path.exists():
@@ -216,6 +222,19 @@ class VisionEncoder(nn.Module):
             return torch.jit.load(str(local_path), map_location="cpu")
         raise ValueError(f"Unsupported vision source: {source}")
 
+    def _validate_backbone_hidden_size(self) -> None:
+        candidate_attrs = ("embed_dim", "num_features", "hidden_size")
+        for attr_name in candidate_attrs:
+            attr_value = getattr(self.backbone, attr_name, None)
+            if attr_value is None:
+                continue
+            if int(attr_value) != self.embed_dim_dino:
+                raise ValueError(
+                    "Vision backbone hidden size does not match embed_dim_dino: "
+                    f"backbone.{attr_name}={attr_value}, embed_dim_dino={self.embed_dim_dino}"
+                )
+            return
+
     def _load_backbone_checkpoint(self, checkpoint_path: Path) -> None:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         if isinstance(checkpoint, Mapping) and "state_dict" in checkpoint:
@@ -255,7 +274,11 @@ class VisionEncoder(nn.Module):
             elif "patch_tokens" in features:
                 patch_tokens = features["patch_tokens"]
             elif "x_prenorm" in features and isinstance(features["x_prenorm"], torch.Tensor):
-                patch_tokens = features["x_prenorm"][:, 1:, :]
+                storage_count = 0
+                storage_tokens = features.get("x_storage_tokens")
+                if isinstance(storage_tokens, torch.Tensor):
+                    storage_count = int(storage_tokens.size(1))
+                patch_tokens = features["x_prenorm"][:, 1 + storage_count :, :]
             else:
                 available = ", ".join(sorted(str(key) for key in features.keys()))
                 raise RuntimeError(
