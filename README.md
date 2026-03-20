@@ -18,6 +18,7 @@ The model is intentionally modular:
 - A DINOText-style alignment head maps visual features into an aligned token space.
 - A lightweight trainable adapter projects aligned visual tokens into the Qwen embedding space.
 - The Qwen3-VL text backbone consumes visual tokens as a prefix sequence followed by text tokens.
+- The same adapter output is also shared into the first several Qwen text layers through DeepStack-style residual injection.
 
 The project does not use the official Qwen3-VL vision tower in the modular path. It uses only the Qwen3-VL text embeddings, decoder stack, and language head.
 

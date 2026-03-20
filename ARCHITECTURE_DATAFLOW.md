@@ -98,11 +98,13 @@ Semantically, this step pulls the DINO patch features toward a text-aligned sema
 
 ### 3. Adapter
 
-The adapter is a token-wise projection:
+The adapter is a token-wise two-layer MLP:
 
 ```text
 LayerNorm(1024)
--> Linear(1024 -> 4096)
+-> Linear(1024 -> 2048)
+-> GELU
+-> Linear(2048 -> 4096)
 -> Dropout
 ```
 
@@ -169,6 +171,72 @@ text labels: [B, T]
 ```
 
 This means the visual tokens participate in attention, but not in direct token-level supervision.
+
+## DeepStack Injection
+
+In addition to prefix concatenation, the current implementation also supports a shared DeepStack injection path into the Qwen3-VL text backbone.
+
+The design is intentionally minimal:
+
+- the project reuses the same adapter output that is already used for the visual prefix
+- no per-layer projection is added
+- no gate is added
+- the same visual embedding tensor is reused for the first several decoder layers
+
+With the current default config:
+
+- `use_deepstack_injection = true`
+- `deepstack_num_layers = 4`
+
+The extra tensors are:
+
+```text
+visual_pos_masks: [B, visual_len + T]
+deepstack_visual_embeds: list of length 4
+```
+
+The semantics are:
+
+- `visual_pos_masks[:, :visual_len] = True`
+- `visual_pos_masks[:, visual_len:] = False`
+- each list element in `deepstack_visual_embeds` is the same shared adapter output flattened over all visual positions
+
+For example, with `224 x 224` inputs during smoke testing:
+
+- visual prefix length = `14 x 14 = 196`
+- `visual_pos_masks` has shape `[B, 196 + T]`
+- each `deepstack_visual_embeds[i]` has shape `[B * 196, 4096]`
+
+For the full `448 x 448` training path:
+
+- visual prefix length = `28 x 28 = 784`
+- `visual_pos_masks` has shape `[B, 784 + T]`
+- each `deepstack_visual_embeds[i]` has shape `[B * 784, 4096]`
+
+Conceptually, the full visual path is now:
+
+```text
+DINOv3
+-> dinotxt head
+-> adapter
+-> visual prefix embeddings
+-> prefix concat into inputs_embeds
+```
+
+and in parallel:
+
+```text
+adapter output
+-> shared DeepStack list
+-> injected into the first 4 Qwen decoder layers
+```
+
+So the current model uses two complementary injection routes:
+
+- prefix injection makes visual tokens part of the unified input sequence
+- DeepStack injection re-injects the same visual semantics into the early hidden states as residual additions
+
+This is not a reproduction of the official Qwen3-VL visual tower. The project does not extract multi-layer visual features from the official Qwen vision encoder. Instead, it reuses the project’s own adapter output as a shared DeepStack signal.
 
 ## Qwen3-VL Text Backbone
 

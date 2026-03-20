@@ -46,19 +46,21 @@ alignment head 的权重来自项目中已有的 checkpoint：
 
 这一步的意义在于：项目并没有直接把原始 DINOv3 token 生硬地接到 LLM 上，而是先借助一个已经具备视觉-文本对齐先验的中间层，把视觉特征推进到一个更适合后续语言建模处理的表示空间。
 
-### 3.2 轻量 adapter：只做表示空间适配
+### 3.2 轻量但非线性的 adapter：做表示空间适配
 
 中间 adapter 定义在：
 
 - [`models/adapter.py`](/home/user/Project_files/project/models/adapter.py)
 
-当前实现非常克制，只包含：
+当前实现仍然非常克制，但已经不是单层线性投影，而是一个轻量两层 MLP，包含：
 
 - `LayerNorm`
 - `Linear`
+- `GELU`
+- `Linear`
 - `Dropout`
 
-也就是说，这个项目没有引入 cross-attention、Q-Former、fusion transformer 之类的复杂结构。adapter 的职责不是重新学习视觉语义，而是把已经对齐过的视觉表示进一步映射到 Qwen 解码器的 hidden size 上，让信息能够以尽量小的改动流入语言模型。
+也就是说，这个项目没有引入 cross-attention、Q-Former、fusion transformer 之类的复杂结构。adapter 的职责不是重新学习视觉语义，而是用一个轻量非线性映射，把已经对齐过的视觉表示进一步投到 Qwen 解码器的 hidden size 上，让信息能够以尽量小的改动流入语言模型。
 
 这个设计反映了一个很明确的实验假设：
 

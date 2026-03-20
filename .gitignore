@@ -8,3 +8,4 @@ __pycache__/
 temp_file/
 pth/
 local_models/
+.vscode/

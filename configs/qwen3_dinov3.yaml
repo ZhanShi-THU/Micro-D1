@@ -16,6 +16,9 @@ model:
   embed_dim_dino: 1024
   alignment_dim: 1024
   hidden_size_qwen: 4096
+  adapter_hidden_dim: 2048
+  use_deepstack_injection: true
+  deepstack_num_layers: 4
 
   adapter_dropout: 0.0
 

@@ -33,6 +33,8 @@ class ModularVLM(nn.Module):
         model_cfg = dict(config["model"])
         self.model_cfg = model_cfg
         self.config = config
+        self.use_deepstack_injection = bool(model_cfg.get("use_deepstack_injection", True))
+        self.deepstack_num_layers = int(model_cfg.get("deepstack_num_layers", 4))
 
         vision_backbone = model_cfg.get("vision_backbone") or model_cfg.get(
             "vision_model_name",
@@ -78,6 +80,7 @@ class ModularVLM(nn.Module):
         self.adapter = VisualAdapter(
             input_dim=alignment_dim,
             output_dim=self.hidden_size_qwen,
+            hidden_dim=int(model_cfg.get("adapter_hidden_dim", 2048)),
             dropout=model_cfg.get("adapter_dropout", 0.0),
         )
         llm_dtype = self._resolve_llm_dtype(config)
@@ -89,6 +92,13 @@ class ModularVLM(nn.Module):
         )
         self.llm_body = self._resolve_llm_body(self.llm)
         self.lm_head = self._resolve_lm_head(self.llm)
+        self.num_decoder_layers = self._resolve_num_decoder_layers(self.llm_body)
+        if self.deepstack_num_layers > self.num_decoder_layers:
+            raise ValueError(
+                "deepstack_num_layers exceeds the number of decoder layers: "
+                f"deepstack_num_layers={self.deepstack_num_layers}, "
+                f"num_decoder_layers={self.num_decoder_layers}"
+            )
 
         self.freeze_modules(
             freeze_strategy=model_cfg.get("freeze_strategy", []),
@@ -138,6 +148,11 @@ class ModularVLM(nn.Module):
             raise AttributeError("Unable to locate the output projection head of the LLM.")
         return output_embeddings
 
+    def _resolve_num_decoder_layers(self, llm_body: nn.Module) -> int:
+        if hasattr(llm_body, "layers"):
+            return len(llm_body.layers)
+        raise AttributeError("Unable to locate decoder layers in the loaded Qwen text backbone.")
+
     def freeze_modules(
         self,
         freeze_strategy: Iterable[str],
@@ -176,6 +191,29 @@ class ModularVLM(nn.Module):
         embedding_layer = self.llm.get_input_embeddings()
         return embedding_layer(input_ids)
 
+    def _build_deepstack_inputs(
+        self,
+        visual_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, List[torch.Tensor] | None]:
+        total_seq_len = visual_embeds.size(1) + attention_mask.size(1)
+        visual_pos_masks = torch.zeros(
+            visual_embeds.size(0),
+            total_seq_len,
+            dtype=torch.bool,
+            device=visual_embeds.device,
+        )
+        visual_pos_masks[:, : visual_embeds.size(1)] = True
+
+        if not self.use_deepstack_injection:
+            return visual_pos_masks, None
+
+        shared_visual_embeds = visual_embeds.reshape(-1, visual_embeds.size(-1))
+        deepstack_visual_embeds = [
+            shared_visual_embeds for _ in range(self.deepstack_num_layers)
+        ]
+        return visual_pos_masks, deepstack_visual_embeds
+
     def build_multimodal_inputs(
         self,
         pixel_values: torch.Tensor,
@@ -198,11 +236,18 @@ class ModularVLM(nn.Module):
             [visual_attention_mask, attention_mask],
             dim=1,
         )
+        visual_pos_masks, deepstack_visual_embeds = self._build_deepstack_inputs(
+            visual_embeds=visual_embeds,
+            attention_mask=attention_mask,
+        )
 
         model_inputs: Dict[str, torch.Tensor] = {
             "inputs_embeds": inputs_embeds,
             "attention_mask": merged_attention_mask,
+            "visual_pos_masks": visual_pos_masks,
         }
+        if deepstack_visual_embeds is not None:
+            model_inputs["deepstack_visual_embeds"] = deepstack_visual_embeds
 
         if labels is not None:
             visual_ignore = torch.full(
@@ -246,6 +291,8 @@ class ModularVLM(nn.Module):
         decoder_outputs = self.llm_body.forward(
             inputs_embeds=model_inputs["inputs_embeds"],
             attention_mask=model_inputs["attention_mask"],
+            visual_pos_masks=model_inputs.get("visual_pos_masks"),
+            deepstack_visual_embeds=model_inputs.get("deepstack_visual_embeds"),
             **kwargs,
         )
 

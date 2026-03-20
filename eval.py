@@ -302,23 +302,24 @@ class ModularVLMEvaluator:
         input_ids = tokenized["input_ids"].to(self.device)
         attention_mask = tokenized["attention_mask"].to(self.device)
 
-        visual_embeds = self.model.get_visual_embeds(pixel_values)
-        text_embeds = self.model.get_text_embeds(input_ids)
-        inputs_embeds = torch.cat([visual_embeds, text_embeds], dim=1)
-
-        visual_attention_mask = torch.ones(
-            visual_embeds.size(0),
-            visual_embeds.size(1),
-            dtype=attention_mask.dtype,
-            device=self.device,
+        model_inputs = self.model.build_multimodal_inputs(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=None,
         )
-        merged_attention_mask = torch.cat([visual_attention_mask, attention_mask], dim=1)
+        inputs_embeds = model_inputs["inputs_embeds"]
+        merged_attention_mask = model_inputs["attention_mask"]
+        visual_pos_masks = model_inputs.get("visual_pos_masks")
+        deepstack_visual_embeds = model_inputs.get("deepstack_visual_embeds")
 
         generated_ids: List[int] = []
         for _ in range(max_new_tokens):
             decoder_outputs = self.model.llm_body.forward(
                 inputs_embeds=inputs_embeds,
                 attention_mask=merged_attention_mask,
+                visual_pos_masks=visual_pos_masks,
+                deepstack_visual_embeds=deepstack_visual_embeds,
             )
             hidden_states = decoder_outputs[0]
             logits = self.model.lm_head(hidden_states)
@@ -333,6 +334,9 @@ class ModularVLMEvaluator:
             inputs_embeds = torch.cat([inputs_embeds, next_embed], dim=1)
             next_mask = torch.ones((1, 1), dtype=merged_attention_mask.dtype, device=self.device)
             merged_attention_mask = torch.cat([merged_attention_mask, next_mask], dim=1)
+            if visual_pos_masks is not None:
+                next_visual_mask = torch.zeros((visual_pos_masks.size(0), 1), dtype=torch.bool, device=self.device)
+                visual_pos_masks = torch.cat([visual_pos_masks, next_visual_mask], dim=1)
 
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 

@@ -6,4 +6,5 @@ datasets
 PyYAML
 Pillow
 torchmetrics
+numpy
 termcolor
