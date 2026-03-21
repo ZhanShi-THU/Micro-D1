@@ -19,6 +19,7 @@ model:
   adapter_hidden_dim: 2048
   use_deepstack_injection: true
   deepstack_num_layers: 4
+  adapter_init_checkpoint: null
 
   adapter_dropout: 0.0
 

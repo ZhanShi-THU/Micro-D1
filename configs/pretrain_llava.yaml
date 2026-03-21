@@ -21,8 +21,8 @@ model:
 data:
   train_manifest: "/data1/LLaVA-Pretrain/phase1/pretrain.jsonl"
   image_root: null
-  image_size: 448
-  max_text_length: 256
+  image_size: 336
+  max_text_length: 320
   num_workers: 4
 
 training:

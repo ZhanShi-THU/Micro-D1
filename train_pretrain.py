@@ -1,8 +1,8 @@
 """
 LLaVA-Pretrain adapter warm-up training.
 
-This script trains only the visual adapter using caption-style data,
-separate from the VQA-focused train.py.
+This script trains only the visual adapter using prompt-conditioned
+caption/instruction data, separate from the VQA-focused train.py.
 """
 from __future__ import annotations
 
@@ -80,14 +80,20 @@ def build_image_transform(image_size: int):
 
 
 def build_collate_fn(tokenizer, image_transform, max_text_length: int):
-    """Build collate function for caption-style data.
+    """Build collate function for prompt-conditioned phase-1 data.
 
-    Format: <BOS> caption <EOS> as both input and labels (with shift).
-    Visual tokens get -100 labels (no direct supervision).
+    Each sample is trained as:
+      input_ids = prompt_ids + target_ids (+ eos)
+      labels    = [-100] * len(prompt_ids) + target_ids (+ eos)
+
+    Visual prefix tokens are supervised implicitly through the same LM loss path
+    already implemented in the model. Prompt tokens never contribute to loss.
     """
+
     def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         pixel_values = torch.stack([image_transform(item["image"]) for item in batch])
-        captions = [item["text"] for item in batch]
+        prompts = [item["text"] for item in batch]
+        targets = [item["target_text"] for item in batch]
 
         pad_token_id = tokenizer.pad_token_id
         if pad_token_id is None:
@@ -95,55 +101,61 @@ def build_collate_fn(tokenizer, image_transform, max_text_length: int):
         if pad_token_id is None:
             raise ValueError("Tokenizer must define pad_token_id or eos_token_id.")
 
-        bos_token_id = tokenizer.bos_token_id
         eos_token_id = tokenizer.eos_token_id
 
         input_id_rows: List[List[int]] = []
         label_rows: List[List[int]] = []
+        attention_rows: List[List[int]] = []
 
-        for caption in captions:
-            # Tokenize caption
-            caption_tokens = tokenizer(
-                caption,
+        for prompt, target in zip(prompts, targets):
+            prompt_ids = tokenizer(
+                prompt,
+                add_special_tokens=False,
+                return_attention_mask=False,
+            )["input_ids"]
+            target_ids = tokenizer(
+                target,
                 add_special_tokens=False,
                 return_attention_mask=False,
             )["input_ids"]
 
-            # Build input: [BOS] + caption + [EOS]
-            # Using BOS and EOS as special tokens for sequence boundary
-            input_ids = []
-            if bos_token_id is not None:
-                input_ids.append(bos_token_id)
-            input_ids.extend(caption_tokens)
             if eos_token_id is not None:
-                input_ids.append(eos_token_id)
+                target_ids = target_ids + [eos_token_id]
 
-            # Labels: [-100 for input tokens] + [caption tokens + EOS]
-            # This is teacher-forcing where visual tokens don't contribute to loss
-            labels = [-100] * len(input_ids)
-            for i, token_id in enumerate(caption_tokens):
-                labels[i + (1 if bos_token_id is not None else 0)] = token_id
-            if eos_token_id is not None:
-                labels[-1] = eos_token_id
+            if not target_ids:
+                raise ValueError("Phase-1 target_text must produce at least one target token.")
+            if max_text_length <= 0:
+                raise ValueError(f"max_text_length must be positive, got {max_text_length}")
 
-            # Truncate or pad
-            if len(input_ids) > max_text_length:
-                input_ids = input_ids[:max_text_length]
-                labels = labels[:max_text_length]
-            else:
-                pad_len = max_text_length - len(input_ids)
-                input_ids.extend([pad_token_id] * pad_len)
-                labels.extend([-100] * pad_len)
+            # Preserve at least one supervised target token when possible.
+            max_prompt_len = max_text_length - 1
+            if len(prompt_ids) > max_prompt_len:
+                prompt_ids = prompt_ids[:max_prompt_len]
 
-            input_id_rows.append(input_ids)
-            label_rows.append(labels)
+            available_target_len = max_text_length - len(prompt_ids)
+            if available_target_len <= 0:
+                raise RuntimeError("Unable to allocate space for target tokens in phase-1 collation.")
 
-        attention_mask = [[1 if tid != pad_token_id else 0 for tid in row] for row in input_id_rows]
+            target_ids = target_ids[:available_target_len]
+            if not target_ids:
+                raise RuntimeError("Prompt truncation failed to preserve any target tokens.")
+
+            combined_ids = prompt_ids + target_ids
+            combined_labels = ([-100] * len(prompt_ids)) + target_ids
+            combined_attention = [1] * len(combined_ids)
+
+            pad_len = max_text_length - len(combined_ids)
+            if pad_len < 0:
+                raise RuntimeError("Combined prompt/target sequence exceeded max_text_length unexpectedly.")
+
+            input_id_rows.append(combined_ids + ([pad_token_id] * pad_len))
+            label_rows.append(combined_labels + ([-100] * pad_len))
+            attention_rows.append(combined_attention + ([0] * pad_len))
 
         return {
             "pixel_values": pixel_values,
             "input_ids": torch.tensor(input_id_rows, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_rows, dtype=torch.long),
             "labels": torch.tensor(label_rows, dtype=torch.long),
         }
 
@@ -275,7 +287,6 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "train_log.jsonl"
 
-    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         config["model"]["llm_base"],
         trust_remote_code=True,
@@ -283,16 +294,13 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Build model
     model = ModularVLM(config).to(device)
     apply_adapter_training(model)
 
-    # Build dataloader
     dataloader = build_dataloader(config, tokenizer)
     if dataloader is None:
         return
 
-    # Resume from checkpoint if specified
     start_step = 0
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
@@ -306,7 +314,6 @@ def main() -> None:
         if param.requires_grad:
             print(f"  - {name}")
 
-    # Build optimizer and scheduler
     training_cfg = config["training"]
     optimizer = build_optimizer(
         model,
@@ -331,7 +338,6 @@ def main() -> None:
         num_training_steps=max(total_update_steps, 1),
     )
 
-    # Mixed precision
     autocast_dtype = resolve_autocast_dtype(training_cfg.get("mixed_precision", "none"))
     use_amp = device.type == "cuda" and autocast_dtype is not None
     use_grad_scaler = use_amp and autocast_dtype == torch.float16
@@ -421,7 +427,6 @@ def main() -> None:
         if max_steps is not None and optimizer_step >= max_steps:
             break
 
-    # Save final checkpoint
     final_checkpoint = save_adapter_checkpoint(
         model=model,
         optimizer=optimizer,

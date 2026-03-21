@@ -28,6 +28,15 @@ def parse_args() -> argparse.Namespace:
         default="configs/qwen3_dinov3.yaml",
     )
     parser.add_argument(
+        "--adapter-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Optional adapter checkpoint to initialize from before applying the "
+            "selected training phase."
+        ),
+    )
+    parser.add_argument(
         "--phase",
         type=str,
         default=None,
@@ -273,6 +282,20 @@ def resolve_autocast_dtype(mixed_precision: str) -> torch.dtype | None:
     return None
 
 
+def load_adapter_checkpoint(model: ModularVLM, checkpoint_path: str) -> None:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if "adapter" in checkpoint:
+        model.adapter.load_state_dict(checkpoint["adapter"], strict=True)
+    elif "model" in checkpoint:
+        model.adapter.load_state_dict(checkpoint["model"], strict=True)
+    else:
+        raise KeyError("Checkpoint is missing 'adapter' or 'model' state.")
+
+    llm_state = checkpoint.get("llm_trainable_state")
+    if llm_state:
+        model.llm.load_state_dict(llm_state, strict=False)
+
+
 def save_checkpoint(
     model: ModularVLM,
     optimizer: AdamW,
@@ -326,6 +349,9 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = ModularVLM(config).to(device)
+    adapter_checkpoint = args.adapter_checkpoint or config["model"].get("adapter_init_checkpoint")
+    if adapter_checkpoint:
+        load_adapter_checkpoint(model, adapter_checkpoint)
     apply_training_phase(model, phase_cfg)
     dataloader = build_dataloader(config, tokenizer)
     manifest_defaults = get_unified_manifest_paths(config["data"].get("unified_root"))
@@ -336,6 +362,8 @@ def main() -> None:
 
     print(f"Active phase: {phase_name} ({phase_cfg.get('name', phase_name)})")
     print(f"Train manifest: {config['data'].get('train_manifest') or manifest_defaults['train']}")
+    if adapter_checkpoint:
+        print(f"Initialized adapter from: {adapter_checkpoint}")
     print("Trainable parameters:")
     for name in model.trainable_parameter_names():
         print(f"  - {name}")
