@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import math
 import random
@@ -207,6 +208,11 @@ def apply_training_phase(model: ModularVLM, phase_cfg: Dict[str, Any]) -> None:
             param.requires_grad = True
 
     llm_last_n = int(phase_cfg.get("llm_tune_last_n_layers", 0))
+    if llm_last_n > 0 and model.llm_is_quantized:
+        raise ValueError(
+            "Quantized LLM loading is only supported for frozen-LLM training in this scaffold. "
+            "Set model.llm_quantization='none' before enabling llm_tune_last_n_layers."
+        )
     if llm_last_n > 0:
         decoder_layers = get_decoder_layers(model)
         if llm_last_n > len(decoder_layers):
@@ -332,6 +338,43 @@ def append_train_log(log_path: Path, payload: Dict[str, Any]) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def resolve_run_output_dir(config: Dict[str, Any]) -> tuple[Path, str]:
+    training_cfg = config["training"]
+    base_output_dir = Path(training_cfg["output_dir"])
+    use_run_subdir = bool(training_cfg.get("use_run_subdir", True))
+    configured_run_name = training_cfg.get("run_name")
+
+    if not use_run_subdir:
+        return base_output_dir, configured_run_name or base_output_dir.name
+
+    run_name = configured_run_name
+    if not run_name:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"{config.get('project_name', 'run')}_{timestamp}"
+    return base_output_dir / run_name, run_name
+
+
+def write_run_metadata(
+    output_dir: Path,
+    config: Dict[str, Any],
+    run_name: str,
+    args: argparse.Namespace,
+    phase_name: str,
+) -> None:
+    with open(output_dir / "resolved_config.yaml", "w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle, sort_keys=False, allow_unicode=True)
+
+    run_info = {
+        "run_name": run_name,
+        "phase": phase_name,
+        "config_path": args.config,
+        "adapter_checkpoint": args.adapter_checkpoint,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    with open(output_dir / "run_info.json", "w", encoding="utf-8") as handle:
+        json.dump(run_info, handle, ensure_ascii=False, indent=2)
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -348,7 +391,8 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = ModularVLM(config).to(device)
+    model = ModularVLM(config)
+    model = model.prepare_for_training_device(device)
     adapter_checkpoint = args.adapter_checkpoint or config["model"].get("adapter_init_checkpoint")
     if adapter_checkpoint:
         load_adapter_checkpoint(model, adapter_checkpoint)
@@ -356,11 +400,22 @@ def main() -> None:
     dataloader = build_dataloader(config, tokenizer)
     manifest_defaults = get_unified_manifest_paths(config["data"].get("unified_root"))
 
-    output_dir = Path(training_cfg["output_dir"])
+    output_dir, run_name = resolve_run_output_dir(config)
+    config["training"]["resolved_output_dir"] = str(output_dir)
+    config["training"]["resolved_run_name"] = run_name
     output_dir.mkdir(parents=True, exist_ok=True)
+    write_run_metadata(
+        output_dir=output_dir,
+        config=config,
+        run_name=run_name,
+        args=args,
+        phase_name=phase_name,
+    )
     log_path = output_dir / "train_log.jsonl"
 
     print(f"Active phase: {phase_name} ({phase_cfg.get('name', phase_name)})")
+    print(f"Run name: {run_name}")
+    print(f"Output dir: {output_dir}")
     print(f"Train manifest: {config['data'].get('train_manifest') or manifest_defaults['train']}")
     if adapter_checkpoint:
         print(f"Initialized adapter from: {adapter_checkpoint}")

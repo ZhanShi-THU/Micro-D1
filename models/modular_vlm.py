@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import AutoConfig, AutoModelForImageTextToText
+from transformers import AutoConfig, AutoModelForImageTextToText, BitsAndBytesConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from models.adapter import VisualAdapter
@@ -35,6 +35,8 @@ class ModularVLM(nn.Module):
         self.config = config
         self.use_deepstack_injection = bool(model_cfg.get("use_deepstack_injection", True))
         self.deepstack_num_layers = int(model_cfg.get("deepstack_num_layers", 4))
+        self.llm_quantization = self._resolve_llm_quantization()
+        self.llm_is_quantized = self.llm_quantization != "none"
 
         vision_backbone = model_cfg.get("vision_backbone") or model_cfg.get(
             "vision_model_name",
@@ -84,11 +86,13 @@ class ModularVLM(nn.Module):
             dropout=model_cfg.get("adapter_dropout", 0.0),
         )
         llm_dtype = self._resolve_llm_dtype(config)
+        llm_loading_kwargs = self._build_llm_loading_kwargs(
+            llm_dtype=llm_dtype,
+            local_files_only=llm_local_only,
+        )
         self.llm = AutoModelForImageTextToText.from_pretrained(
             model_cfg["llm_base"],
-            trust_remote_code=True,
-            local_files_only=llm_local_only,
-            dtype=llm_dtype,
+            **llm_loading_kwargs,
         )
         self.llm_body = self._resolve_llm_body(self.llm)
         self.lm_head = self._resolve_lm_head(self.llm)
@@ -113,6 +117,17 @@ class ModularVLM(nn.Module):
             return int(llm_config.hidden_size)
         raise ValueError("Unable to determine the Qwen3-VL text hidden size from config.")
 
+    def _resolve_llm_quantization(self) -> str:
+        quantization = str(self.model_cfg.get("llm_quantization", "none")).strip().lower()
+        if quantization in {"", "none", "false", "null"}:
+            return "none"
+        if quantization in {"8bit", "4bit"}:
+            return quantization
+        raise ValueError(
+            "Unsupported llm_quantization. Expected one of: none, 8bit, 4bit. "
+            f"Received: {self.model_cfg.get('llm_quantization')!r}"
+        )
+
     def _resolve_llm_dtype(self, config: Dict[str, Any]) -> torch.dtype | None:
         explicit_dtype = str(self.model_cfg.get("llm_dtype", "")).lower()
         if explicit_dtype:
@@ -130,6 +145,67 @@ class ModularVLM(nn.Module):
         if mixed_precision == "fp16":
             return torch.float16
         return None
+
+    def _resolve_llm_quant_compute_dtype(self) -> torch.dtype:
+        compute_dtype = str(
+            self.model_cfg.get(
+                "llm_quant_compute_dtype",
+                self.model_cfg.get("llm_dtype", ""),
+            )
+        ).lower()
+        if compute_dtype in {"", "auto", "bf16"}:
+            return torch.bfloat16
+        if compute_dtype == "fp16":
+            return torch.float16
+        if compute_dtype in {"fp32", "float32"}:
+            return torch.float32
+        raise ValueError(
+            "Unsupported llm_quant_compute_dtype. Expected one of: auto, bf16, fp16, fp32. "
+            f"Received: {self.model_cfg.get('llm_quant_compute_dtype')!r}"
+        )
+
+    def _resolve_quantized_llm_device(self) -> str:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Quantized LLM loading requires CUDA, but torch.cuda.is_available() is False.")
+        current_device = torch.cuda.current_device()
+        return f"cuda:{current_device}"
+
+    def _build_llm_loading_kwargs(
+        self,
+        llm_dtype: torch.dtype | None,
+        local_files_only: bool,
+    ) -> Dict[str, Any]:
+        loading_kwargs: Dict[str, Any] = {
+            "trust_remote_code": True,
+            "local_files_only": local_files_only,
+        }
+        if llm_dtype is not None:
+            loading_kwargs["torch_dtype"] = llm_dtype
+
+        if not self.llm_is_quantized:
+            return loading_kwargs
+
+        try:
+            import bitsandbytes  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "llm_quantization was requested but bitsandbytes is not installed in the active "
+                "environment. Install it first, or set model.llm_quantization to 'none'."
+            ) from exc
+
+        if self.llm_quantization == "8bit":
+            quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        else:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=self._resolve_llm_quant_compute_dtype(),
+                bnb_4bit_quant_type=str(self.model_cfg.get("llm_quant_type", "nf4")),
+                bnb_4bit_use_double_quant=bool(self.model_cfg.get("llm_quant_double_quant", True)),
+            )
+
+        loading_kwargs["quantization_config"] = quantization_config
+        loading_kwargs["device_map"] = {"": self._resolve_quantized_llm_device()}
+        return loading_kwargs
 
     def _resolve_llm_body(self, llm: nn.Module) -> nn.Module:
         if hasattr(llm, "model") and hasattr(llm.model, "language_model"):
@@ -152,6 +228,29 @@ class ModularVLM(nn.Module):
         if hasattr(llm_body, "layers"):
             return len(llm_body.layers)
         raise AttributeError("Unable to locate decoder layers in the loaded Qwen text backbone.")
+
+    def get_llm_device(self) -> torch.device:
+        input_embeddings = self.llm.get_input_embeddings()
+        weight = getattr(input_embeddings, "weight", None)
+        if weight is not None:
+            return weight.device
+        return next(self.llm.parameters()).device
+
+    def prepare_for_training_device(self, device: torch.device) -> "ModularVLM":
+        if not self.llm_is_quantized:
+            return self.to(device)
+
+        llm_device = self.get_llm_device()
+        if llm_device.type != device.type or llm_device.index != device.index:
+            raise RuntimeError(
+                "Quantized LLM was loaded onto a different device than the trainer expects: "
+                f"llm_device={llm_device}, trainer_device={device}. "
+                "Ensure torch.cuda.set_device(local_rank) runs before building the model."
+            )
+
+        self.vision_encoder.to(device)
+        self.adapter.to(device)
+        return self
 
     def freeze_modules(
         self,

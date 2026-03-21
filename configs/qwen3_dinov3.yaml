@@ -12,6 +12,9 @@ model:
   alignment_head_weights: "/home/user/Project_files/project/pth/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth"
 
   llm_base: "/home/user/Project_files/project/local_models/qwen3-vl-8b"
+  llm_quantization: "none"
+  llm_quant_compute_dtype: "bf16"
+  llm_quant_double_quant: true
 
   embed_dim_dino: 1024
   alignment_dim: 1024
@@ -37,6 +40,8 @@ data:
 training:
   active_phase: "phase1"
   output_dir: "./outputs/qwen3_dinov3"
+  use_run_subdir: true
+  run_name: null
   batch_size: 2
   num_epochs: 1
   learning_rate: 1.0e-4

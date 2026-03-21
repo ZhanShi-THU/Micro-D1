@@ -90,10 +90,11 @@ class ImageTextDataset(Dataset):
             raise KeyError("Caption sample is missing 'image' or 'image_path'.")
         return {
             "sample_type": "caption",
-            "image": self._load_image(image_path),
+            "image_path": str(image_path),
             "prompt_text": sample["text"],
             "target_text": sample.get("target_text", sample["text"]),
             "metadata": {
+                **(sample.get("metadata") or {}),
                 "image_path": str(image_path),
             },
         }
@@ -112,10 +113,10 @@ class ImageTextDataset(Dataset):
             build_microvqa_target(int(sample["correct_index"])),
         )
 
-        image = self._load_microvqa_image(sample)
+        image_path = self._resolve_microvqa_image_path(sample)
         return {
             "sample_type": "microvqa",
-            "image": image,
+            "image_path": image_path,
             "prompt_text": prompt_text,
             "target_text": target_text,
             "metadata": {
@@ -144,16 +145,16 @@ class ImageTextDataset(Dataset):
         resolved = self._resolve_image_path(image_path)
         return Image.open(resolved).convert("RGB")
 
-    def _load_microvqa_image(self, sample: Dict[str, Any]) -> Image.Image:
+    def _resolve_microvqa_image_path(self, sample: Dict[str, Any]) -> str:
         if "images_list" in sample:
             images_list = sample["images_list"]
             if not isinstance(images_list, list) or not images_list:
                 raise ValueError("'images_list' must be a non-empty list.")
             first_image = images_list[0]
             if isinstance(first_image, str):
-                return self._load_image(first_image)
+                return first_image
             if isinstance(first_image, dict) and "path" in first_image:
-                return self._load_image(first_image["path"])
+                return str(first_image["path"])
             raise TypeError(
                 "Only path-based microvqa images are supported in manifest files."
             )
@@ -163,7 +164,7 @@ class ImageTextDataset(Dataset):
             raise KeyError(
                 "microvqa sample is missing 'images_list', 'image', or 'image_path'."
             )
-        return self._load_image(image_path)
+        return str(image_path)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -171,7 +172,7 @@ class ImageTextDataset(Dataset):
     def __getitem__(self, index: int) -> Dict[str, Any]:
         sample = self.samples[index]
         return {
-            "image": sample["image"],
+            "image": self._load_image(sample["image_path"]),
             "text": sample["prompt_text"],
             "target_text": sample["target_text"],
             "sample_type": sample["sample_type"],

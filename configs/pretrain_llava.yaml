@@ -10,11 +10,14 @@ model:
   vision_checkpoint_path: "/home/user/Project_files/project/pth/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
   alignment_head_weights: "/home/user/Project_files/project/pth/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth"
   llm_base: "/home/user/Project_files/project/local_models/qwen3-vl-8b"
+  llm_quantization: "8bit"
+  llm_quant_compute_dtype: "bf16"
+  llm_quant_double_quant: true
   embed_dim_dino: 1024
   alignment_dim: 1024
   hidden_size_qwen: 4096
   adapter_hidden_dim: 2048
-  use_deepstack_injection: true
+  use_deepstack_injection: false
   deepstack_num_layers: 4
   adapter_dropout: 0.0
 
@@ -23,18 +26,29 @@ data:
   image_root: null
   image_size: 336
   max_text_length: 320
-  num_workers: 4
+  num_workers: 8
 
 training:
   output_dir: "./outputs/pretrain_llava"
-  batch_size: 4
+  use_run_subdir: true
+  run_name: null
+  batch_size: 1
   num_epochs: 1
   learning_rate: 1.0e-4
   weight_decay: 0.01
-  warmup_steps: 500
-  gradient_accumulation_steps: 4
+  warmup_steps: 1000
+  gradient_accumulation_steps: 16
   max_grad_norm: 1.0
   mixed_precision: "bf16"
-  log_every: 50
+  log_every: 10
   save_every: 5000
   device: "cuda"
+  wandb:
+    enabled: true
+    project: "microvqa"
+    entity: null
+    name: null
+    mode: null
+    tags:
+      - "phase1"
+      - "llava-pretrain"

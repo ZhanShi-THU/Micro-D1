@@ -9,3 +9,5 @@ temp_file/
 pth/
 local_models/
 .vscode/
+wandb/
+outputs/
