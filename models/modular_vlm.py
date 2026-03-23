@@ -208,12 +208,24 @@ class ModularVLM(nn.Module):
         return loading_kwargs
 
     def _resolve_llm_body(self, llm: nn.Module) -> nn.Module:
+        if hasattr(llm, "get_base_model"):
+            base_model = llm.get_base_model()
+            if base_model is not llm:
+                return self._resolve_llm_body(base_model)
+        if hasattr(llm, "base_model"):
+            base_model = getattr(llm, "base_model")
+            if base_model is not llm:
+                return self._resolve_llm_body(base_model)
+        if hasattr(llm, "language_model"):
+            return llm.language_model
+        if hasattr(llm, "text_model"):
+            return llm.text_model
         if hasattr(llm, "model") and hasattr(llm.model, "language_model"):
             return llm.model.language_model
+        if hasattr(llm, "model") and hasattr(llm.model, "text_model"):
+            return llm.model.text_model
         if hasattr(llm, "model"):
             return llm.model
-        if hasattr(llm, "get_base_model"):
-            return llm.get_base_model()
         raise AttributeError("Unable to locate the base decoder model inside the LLM.")
 
     def _resolve_lm_head(self, llm: nn.Module) -> nn.Module:
@@ -225,9 +237,28 @@ class ModularVLM(nn.Module):
         return output_embeddings
 
     def _resolve_num_decoder_layers(self, llm_body: nn.Module) -> int:
-        if hasattr(llm_body, "layers"):
-            return len(llm_body.layers)
+        candidate_attr_paths = (
+            ("layers",),
+            ("model", "layers"),
+            ("decoder", "layers"),
+            ("language_model", "model", "layers"),
+        )
+
+        for attr_path in candidate_attr_paths:
+            current = llm_body
+            for attr in attr_path:
+                if not hasattr(current, attr):
+                    current = None
+                    break
+                current = getattr(current, attr)
+            if current is not None:
+                return len(current)
         raise AttributeError("Unable to locate decoder layers in the loaded Qwen text backbone.")
+
+    def refresh_llm_references(self) -> None:
+        self.llm_body = self._resolve_llm_body(self.llm)
+        self.lm_head = self._resolve_lm_head(self.llm)
+        self.num_decoder_layers = self._resolve_num_decoder_layers(self.llm_body)
 
     def get_llm_device(self) -> torch.device:
         input_embeddings = self.llm.get_input_embeddings()

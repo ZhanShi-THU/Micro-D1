@@ -62,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to checkpoint to resume from",
     )
     parser.add_argument(
+        "--save_every",
+        type=int,
+        default=None,
+        help="Override save_every from config (in steps)",
+    )
+    parser.add_argument(
         "--local-rank",
         type=int,
         default=int(os.environ.get("LOCAL_RANK", -1)),
@@ -572,7 +578,7 @@ def main() -> None:
 
     max_grad_norm = float(train_cfg["max_grad_norm"])
     log_every = int(train_cfg["log_every"])
-    save_every = int(train_cfg["save_every"])
+    save_every = int(args.save_every if args.save_every is not None else train_cfg["save_every"])
     wandb_run = maybe_init_wandb(config, args)
     if wandb_run is not None:
         wandb_run.summary["dataset_size"] = dataset_size

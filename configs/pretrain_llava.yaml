@@ -37,11 +37,11 @@ training:
   learning_rate: 1.0e-4
   weight_decay: 0.01
   warmup_steps: 1000
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 8
   max_grad_norm: 1.0
   mixed_precision: "bf16"
   log_every: 10
-  save_every: 5000
+  save_every: 1000
   device: "cuda"
   wandb:
     enabled: true
