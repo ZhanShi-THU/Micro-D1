@@ -1,4 +1,4 @@
-from training.legacy_train import main
+from training.phase3 import main
 
 
 if __name__ == "__main__":

@@ -17,6 +17,15 @@ class UnifiedVQAPrepareTests(unittest.TestCase):
         self.assertIn("(1): dog", prompt)
         self.assertEqual(build_microvqa_target(1), "The answer is (1)")
 
+    def test_answer_only_prompt_style_skips_step_by_step_instruction(self) -> None:
+        prompt = build_microvqa_prompt(
+            "What is shown?",
+            ["cat", "dog"],
+            prompt_style="answer_only",
+        )
+        self.assertNotIn("Think step by step", prompt)
+        self.assertIn('The answer is (X)', prompt)
+
     def test_infer_answer_index(self) -> None:
         self.assertEqual(infer_answer_index("dog", ["cat", "dog", "bird"]), 1)
 

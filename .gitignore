@@ -11,3 +11,4 @@ local_models/
 .vscode/
 wandb/
 outputs/
+eval_outputs/

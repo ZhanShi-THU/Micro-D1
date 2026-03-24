@@ -7,8 +7,17 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Sequence
 
 
-MULTIPLE_CHOICE_PROMPT_TEMPLATE = """The following is a multiple choice question (with answers) related to the image below.
+REASONING_MULTIPLE_CHOICE_PROMPT_TEMPLATE = """The following is a multiple choice question (with answers) related to the image below.
 Think step by step and then output the answer in the format of "The answer is (X)" at the end.
+
+{question}
+
+Options:
+{choices}
+"""
+
+ANSWER_ONLY_MULTIPLE_CHOICE_PROMPT_TEMPLATE = """The following is a multiple choice question (with answers) related to the image below.
+Answer in the format of "The answer is (X)".
 
 {question}
 
@@ -96,8 +105,28 @@ def format_choices_for_prompt(choices: Sequence[str]) -> str:
     return "".join(f"  ({idx}): {choice}\n" for idx, choice in enumerate(choices))
 
 
-def build_multiple_choice_prompt(question: str, choices: Sequence[str]) -> str:
-    return MULTIPLE_CHOICE_PROMPT_TEMPLATE.format(
+def resolve_prompt_style(prompt_style: str | None = None) -> str:
+    normalized = str(prompt_style or "reasoning").strip().lower()
+    if normalized not in {"reasoning", "answer_only"}:
+        raise ValueError(
+            "Unsupported prompt_style. Expected one of: reasoning, answer_only. "
+            f"Received: {prompt_style!r}"
+        )
+    return normalized
+
+
+def build_multiple_choice_prompt(
+    question: str,
+    choices: Sequence[str],
+    prompt_style: str | None = None,
+) -> str:
+    style = resolve_prompt_style(prompt_style)
+    template = (
+        ANSWER_ONLY_MULTIPLE_CHOICE_PROMPT_TEMPLATE
+        if style == "answer_only"
+        else REASONING_MULTIPLE_CHOICE_PROMPT_TEMPLATE
+    )
+    return template.format(
         question=question,
         choices=format_choices_for_prompt(choices),
     )

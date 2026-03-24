@@ -19,8 +19,12 @@ def format_microvqa_choices(choices: Sequence[str]) -> str:
     return format_choices_for_prompt(choices)
 
 
-def build_microvqa_prompt(question: str, choices: Sequence[str]) -> str:
-    return build_multiple_choice_prompt(question, choices)
+def build_microvqa_prompt(
+    question: str,
+    choices: Sequence[str],
+    prompt_style: str = "reasoning",
+) -> str:
+    return build_multiple_choice_prompt(question, choices, prompt_style=prompt_style)
 
 
 def build_microvqa_target(correct_index: int) -> str:
@@ -59,8 +63,10 @@ class ImageTextDataset(Dataset):
         self,
         manifest_path: str,
         image_root: str | None = None,
+        prompt_style: str = "reasoning",
     ) -> None:
         self.image_root = Path(image_root) if image_root else None
+        self.prompt_style = prompt_style
         self.samples = self._load_manifest(manifest_path)
 
     def _load_manifest(self, manifest_path: str) -> List[Dict[str, Any]]:
@@ -107,7 +113,11 @@ class ImageTextDataset(Dataset):
         if not isinstance(choices, list) or not choices:
             raise ValueError("microvqa sample 'choices' must be a non-empty list.")
 
-        prompt_text = build_microvqa_prompt(sample["question"], choices)
+        prompt_text = build_microvqa_prompt(
+            sample["question"],
+            choices,
+            prompt_style=self.prompt_style,
+        )
         target_text = sample.get(
             "target_text",
             build_microvqa_target(int(sample["correct_index"])),

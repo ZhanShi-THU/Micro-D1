@@ -72,7 +72,34 @@ def test_microvqa_dataset_keeps_paths_until_getitem() -> None:
         assert "What color is the image?" in sample["text"]
 
 
+def test_microvqa_dataset_supports_answer_only_prompt_style() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        image_path = root / "micro_answer_only.jpg"
+        Image.new("RGB", (6, 6), color="black").save(image_path)
+
+        manifest_path = root / "micro_answer_only.jsonl"
+        write_jsonl(
+            manifest_path,
+            [
+                {
+                    "image_path": str(image_path),
+                    "question": "What color is the image?",
+                    "choices": ["white", "black"],
+                    "correct_index": 1,
+                }
+            ],
+        )
+
+        dataset = ImageTextDataset(str(manifest_path), prompt_style="answer_only")
+        sample = dataset[0]
+
+        assert "Think step by step" not in sample["text"]
+        assert 'The answer is (X)' in sample["text"]
+
+
 if __name__ == "__main__":
     test_caption_dataset_loads_images_lazily()
     test_microvqa_dataset_keeps_paths_until_getitem()
+    test_microvqa_dataset_supports_answer_only_prompt_style()
     print({"status": "ok"})

@@ -1,0 +1,67 @@
+suite_name: "microvqa_phase_progression"
+output_root: "./eval_outputs/microvqa_phase_progression"
+manifest: "/data1/staging_datasets/unified_vqa/manifests/by_split/microvqa_test.jsonl"
+device: "cuda"
+max_new_tokens: 32
+
+baseline:
+  enabled: false
+  name: "baseline_qwen3_vl"
+  model_path: "/home/user/Project_files/project/local_models/qwen3-vl-8b"
+  prompt_style: "answer_only"
+  max_new_tokens: 96
+
+runs:
+  - name: "phase1_adapter_warmup"
+    enabled: true
+    config: "configs/pretrain_llava.yaml"
+    checkpoint: "/home/user/Project_files/project/outputs/pretrain_llava/adapter_checkpoint_phase1.pt"
+    prompt_style: "answer_only"
+    image_preprocessing: "pad_preserve"
+    image_size: 448
+    max_text_length: 192
+
+  - name: "phase2a_instruct"
+    enabled: false
+    config: "configs/phase2_qwen3_dinov3.yaml"
+    checkpoint: "/home/user/Project_files/project/outputs/phase2_qwen3_dinov3/qwen3_dinov3_phase2_instruct_20260323_225839/phase2_instruct_step_200.pt"
+    prompt_style: "answer_only"
+    image_preprocessing: "pad_preserve"
+    image_size: 448
+    max_text_length: 192
+
+  - name: "phase2b_vqa"
+    enabled: false
+    config: "configs/phase2_qwen3_dinov3.yaml"
+    checkpoint: "/home/user/Project_files/project/outputs/phase2_qwen3_dinov3/qwen3_dinov3_phase2_vqa_20260324_003245/phase2_vqa_best.pt"
+    prompt_style: "answer_only"
+    image_preprocessing: "pad_preserve"
+    image_size: 448
+    max_text_length: 192
+
+  - name: "phase3_final"
+    enabled: false
+    config: "configs/phase3_qwen3_dinov3.yaml"
+    checkpoint: "/path/to/phase3_best_accuracy.pt"
+    prompt_style: "answer_only"
+    image_preprocessing: "pad_preserve"
+    image_size: 448
+    max_text_length: 192
+
+  - name: "phase3_reasoning_prompt"
+    enabled: false
+    config: "configs/phase3_qwen3_dinov3.yaml"
+    checkpoint: "/path/to/phase3_best_accuracy.pt"
+    prompt_style: "reasoning"
+    image_preprocessing: "pad_preserve"
+    image_size: 448
+    max_text_length: 192
+
+  - name: "phase3_resize_448"
+    enabled: false
+    config: "configs/phase3_qwen3_dinov3.yaml"
+    checkpoint: "/path/to/phase3_best_accuracy.pt"
+    prompt_style: "answer_only"
+    image_preprocessing: "resize"
+    image_size: 448
+    max_text_length: 192

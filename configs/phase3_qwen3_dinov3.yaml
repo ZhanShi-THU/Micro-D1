@@ -1,0 +1,90 @@
+project_name: "qwen3_dinov3_phase3"
+seed: 42
+
+model:
+  vision_backbone: "dinov3_vitl16"
+  vision_source: "torch_hub"
+  vision_repo: "facebookresearch/dinov3"
+  vision_model_name: "dinov3_vitl16"
+  vision_pretrained: false
+  vision_checkpoint_path: "/home/user/Project_files/project/pth/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+  alignment_head_weights: "/home/user/Project_files/project/pth/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth"
+  llm_base: "/home/user/Project_files/project/local_models/qwen3-vl-8b"
+  llm_quantization: "4bit"
+  llm_quant_compute_dtype: "bf16"
+  llm_quant_double_quant: true
+  llm_quant_type: "nf4"
+  embed_dim_dino: 1024
+  alignment_dim: 1024
+  hidden_size_qwen: 4096
+  adapter_hidden_dim: 2048
+  adapter_dropout: 0.0
+  use_deepstack_injection: true
+  deepstack_num_layers: 4
+
+phase3:
+  resume_from_phase2_checkpoint: null
+  backbone_train_start_block: 20
+  lora:
+    enabled: true
+    r: 128
+    lora_alpha: 256
+    lora_dropout: 0.05
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+    bias: "none"
+  learning_rates:
+    vision_backbone_top_blocks: 1.0e-6
+    vision_alignment_head: 3.0e-6
+    adapter: 1.5e-5
+    llm_lora: 8.0e-6
+  weight_decay: 0.01
+
+data:
+  unified_root: "/data1/staging_datasets/unified_vqa"
+  train_manifest: "/data1/staging_datasets/unified_vqa/manifests/merged/train.jsonl"
+  val_manifest: "/data1/staging_datasets/unified_vqa/manifests/merged/val.jsonl"
+  test_manifest: "/data1/staging_datasets/unified_vqa/manifests/merged/test.jsonl"
+  image_root: null
+  val_image_root: null
+  test_image_root: null
+  image_size: 448
+  image_preprocessing: "pad_preserve"
+  max_text_length: 192
+  prompt_style: "answer_only"
+  num_workers: 4
+
+training:
+  output_dir: "./outputs/phase3_qwen3_dinov3"
+  use_run_subdir: true
+  run_name: null
+  batch_size: 1
+  eval_batch_size: 1
+  num_epochs: 1
+  max_steps: null
+  warmup_steps: 100
+  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0
+  mixed_precision: "bf16"
+  gradient_checkpointing: true
+  log_every: 10
+  eval_every: 250
+  eval_accuracy_every: 250
+  eval_max_batches: 64
+  eval_accuracy_max_samples: 512
+  eval_max_new_tokens: 16
+  save_every: 1000
+  save_steps: []
+  device: "cuda"
+  wandb:
+    enabled: true
+    project: "microvqa"
+    entity: null
+    name: null
+    mode: null
+    tags:
+      - "phase3"
+      - "unified_vqa"
