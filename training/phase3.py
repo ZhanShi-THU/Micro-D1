@@ -42,7 +42,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 ANSWER_REGEX = re.compile(
-    r"(?:the\s+)?answer(?:\s+is|:)?\s*\*?\*?\(?([0-9]+)\)?",
+    r"(?:^|\b)(?:the\s+)?answer(?:\s+is|:)?\s*\*?\*?\(?([0-9]+)\)?|^\s*\(([0-9]+)\)",
     re.IGNORECASE,
 )
 
@@ -671,7 +671,8 @@ def parse_choice_answer(text: str) -> int | None:
     match = ANSWER_REGEX.search(text)
     if match is None:
         return None
-    return int(match.group(1))
+    value = match.group(1) or match.group(2)
+    return int(value)
 
 
 def sample_eval_indices(dataset_size: int, max_samples: int | None, seed: int) -> List[int]:

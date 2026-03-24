@@ -5,7 +5,7 @@ import json
 import math
 from pathlib import Path
 import sys
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List
 
 import torch
 import yaml
@@ -30,22 +30,15 @@ from evaluation.cli import (
 )
 
 
-DEFAULT_TASK_ALIAS_MAP = {
-    "perception": "EU",
-    "hypothesis_gen": "HG",
-    "experiment_proposal": "EP",
-}
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the detailed MicroVQA gold-standard suite with EU/HG/EP breakdowns."
+        description="Run a simplified unified MCQ suite with overall accuracy only."
     )
     parser.add_argument(
         "--suite-config",
         type=str,
-        default="evaluation/suites/microvqa_gold_detailed.yaml",
-        help="YAML file describing the detailed MicroVQA suite.",
+        default="evaluation/suites/unified_accuracy_suite.yaml",
+        help="YAML file describing the simplified unified suite.",
     )
     parser.add_argument(
         "--device",
@@ -100,68 +93,6 @@ def apply_config_overrides(config: Dict[str, Any], run_cfg: Dict[str, Any], mani
     return updated
 
 
-def normalize_task_name(task_name: str | None) -> str:
-    return str(task_name or "unknown").strip().lower()
-
-
-def resolve_task_alias_map(raw_value: Any) -> Dict[str, str]:
-    mapping = dict(DEFAULT_TASK_ALIAS_MAP)
-    if isinstance(raw_value, Mapping):
-        for key, value in raw_value.items():
-            mapping[normalize_task_name(str(key))] = str(value)
-    return mapping
-
-
-def extract_microvqa_task(sample: Dict[str, Any], task_alias_map: Mapping[str, str]) -> tuple[str, str]:
-    metadata = dict(sample.get("metadata") or {})
-    raw_task = normalize_task_name(metadata.get("task_str"))
-    if raw_task in {"", "none", "null", "unknown"}:
-        raw_task = normalize_task_name(metadata.get("task"))
-    alias = task_alias_map.get(raw_task, raw_task.upper() if raw_task != "unknown" else "UNKNOWN")
-    return raw_task, alias
-
-
-def build_task_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    raw_counts: Dict[str, int] = {}
-    raw_correct: Dict[str, int] = {}
-    alias_counts: Dict[str, int] = {}
-    alias_correct: Dict[str, int] = {}
-
-    for row in rows:
-        raw_task = str(row["task_raw"])
-        alias = str(row["task_alias"])
-        is_correct = bool(row["correct"])
-
-        raw_counts[raw_task] = raw_counts.get(raw_task, 0) + 1
-        raw_correct[raw_task] = raw_correct.get(raw_task, 0) + int(is_correct)
-        alias_counts[alias] = alias_counts.get(alias, 0) + 1
-        alias_correct[alias] = alias_correct.get(alias, 0) + int(is_correct)
-
-    raw_accuracy = {
-        task_name: raw_correct[task_name] / count
-        for task_name, count in raw_counts.items()
-        if count > 0
-    }
-    alias_accuracy = {
-        alias: alias_correct[alias] / count
-        for alias, count in alias_counts.items()
-        if count > 0
-    }
-    macro_accuracy = (
-        sum(alias_accuracy.values()) / len(alias_accuracy)
-        if alias_accuracy
-        else math.nan
-    )
-
-    return {
-        "raw_task_counts": raw_counts,
-        "raw_task_accuracy": raw_accuracy,
-        "alias_counts": alias_counts,
-        "alias_accuracy": alias_accuracy,
-        "macro_accuracy_by_alias": macro_accuracy,
-    }
-
-
 def evaluate_modular_run(
     *,
     run_cfg: Dict[str, Any],
@@ -169,7 +100,6 @@ def evaluate_modular_run(
     samples: List[Dict[str, Any]],
     device: torch.device,
     max_new_tokens: int,
-    task_alias_map: Mapping[str, str],
 ) -> Dict[str, Any]:
     config = load_config(str(run_cfg["config"]))
     config = apply_config_overrides(config, run_cfg, suite_manifest)
@@ -184,7 +114,6 @@ def evaluate_modular_run(
 
     rows: List[Dict[str, Any]] = []
     parse_success = 0
-
     for sample in samples:
         image = resolve_image(sample, image_root=image_root)
         prompt = build_microvqa_prompt(
@@ -195,16 +124,12 @@ def evaluate_modular_run(
         response = evaluator.generate(image, prompt, max_new_tokens)
         pred = parse_choice_answer(response)
         answer = int(sample["correct_index"])
-        task_raw, task_alias = extract_microvqa_task(sample, task_alias_map)
-
         parse_success += int(pred is not None)
         rows.append(
             {
                 "sample_id": sample.get("sample_id"),
                 "source_dataset": sample.get("source_dataset", "unknown"),
                 "split": sample.get("split"),
-                "task_raw": task_raw,
-                "task_alias": task_alias,
                 "question": sample["question"],
                 "correct_index": answer,
                 "prediction_index": pred,
@@ -214,7 +139,6 @@ def evaluate_modular_run(
         )
 
     mcq_summary = build_mcq_summary(rows, {"modular_vlm": "correct"})
-    task_metrics = build_task_metrics(rows)
     summary = {
         "run_name": run_cfg["name"],
         "config": str(run_cfg["config"]),
@@ -225,8 +149,6 @@ def evaluate_modular_run(
         "image_size": config["data"].get("image_size"),
         "parse_success_rate": parse_success / len(rows) if rows else math.nan,
         "mcq_metrics": mcq_summary["models"]["modular_vlm"],
-        "dataset_counts": mcq_summary["dataset_counts"],
-        "microvqa_task_metrics": task_metrics,
         "num_samples": len(rows),
     }
     return {"rows": rows, "summary": summary}
@@ -239,7 +161,6 @@ def evaluate_baseline_run(
     samples: List[Dict[str, Any]],
     device: torch.device,
     max_new_tokens: int,
-    task_alias_map: Mapping[str, str],
 ) -> Dict[str, Any]:
     image_root = baseline_cfg.get("image_root")
     prompt_style = str(baseline_cfg.get("prompt_style", "answer_only"))
@@ -251,7 +172,6 @@ def evaluate_baseline_run(
 
     rows: List[Dict[str, Any]] = []
     parse_success = 0
-
     for sample in samples:
         image = resolve_image(sample, image_root=image_root)
         prompt = build_baseline_prompt(
@@ -262,16 +182,12 @@ def evaluate_baseline_run(
         response = evaluator.generate(image, prompt, baseline_max_new_tokens)
         pred = parse_choice_answer(response)
         answer = int(sample["correct_index"])
-        task_raw, task_alias = extract_microvqa_task(sample, task_alias_map)
-
         parse_success += int(pred is not None)
         rows.append(
             {
                 "sample_id": sample.get("sample_id"),
                 "source_dataset": sample.get("source_dataset", "unknown"),
                 "split": sample.get("split"),
-                "task_raw": task_raw,
-                "task_alias": task_alias,
                 "question": sample["question"],
                 "correct_index": answer,
                 "prediction_index": pred,
@@ -281,7 +197,6 @@ def evaluate_baseline_run(
         )
 
     mcq_summary = build_mcq_summary(rows, {"baseline_qwen3_vl": "correct"})
-    task_metrics = build_task_metrics(rows)
     summary = {
         "run_name": baseline_cfg.get("name", "baseline_qwen3_vl"),
         "model_path": str(baseline_cfg["model_path"]),
@@ -290,8 +205,6 @@ def evaluate_baseline_run(
         "max_new_tokens": baseline_max_new_tokens,
         "parse_success_rate": parse_success / len(rows) if rows else math.nan,
         "mcq_metrics": mcq_summary["models"]["baseline_qwen3_vl"],
-        "dataset_counts": mcq_summary["dataset_counts"],
-        "microvqa_task_metrics": task_metrics,
         "num_samples": len(rows),
     }
     return {"rows": rows, "summary": summary}
@@ -299,16 +212,9 @@ def evaluate_baseline_run(
 
 def make_leaderboard_row(summary: Dict[str, Any]) -> Dict[str, Any]:
     metrics = dict(summary["mcq_metrics"])
-    task_metrics = dict(summary.get("microvqa_task_metrics") or {})
-    alias_accuracy = dict(task_metrics.get("alias_accuracy") or {})
     return {
         "run_name": summary["run_name"],
         "overall_accuracy": metrics.get("overall_accuracy"),
-        "macro_accuracy_by_dataset": metrics.get("macro_accuracy_by_dataset"),
-        "microvqa_macro_accuracy": task_metrics.get("macro_accuracy_by_alias"),
-        "eu_accuracy": alias_accuracy.get("EU"),
-        "hg_accuracy": alias_accuracy.get("HG"),
-        "ep_accuracy": alias_accuracy.get("EP"),
         "num_correct": metrics.get("num_correct"),
         "num_samples": metrics.get("num_samples"),
         "parse_success_rate": summary.get("parse_success_rate"),
@@ -324,7 +230,6 @@ def main() -> None:
     manifest = str(suite_cfg["manifest"])
     max_new_tokens = int(suite_cfg.get("max_new_tokens", 64))
     device = choose_device(args.device or suite_cfg.get("device"))
-    task_alias_map = resolve_task_alias_map(suite_cfg.get("task_alias_map"))
 
     samples = load_jsonl(manifest)
     if args.limit is not None and args.limit > 0:
@@ -336,7 +241,6 @@ def main() -> None:
         "manifest": manifest,
         "num_samples": len(samples),
         "device": str(device),
-        "task_alias_map": dict(task_alias_map),
         "runs": [],
     }
 
@@ -348,7 +252,6 @@ def main() -> None:
             samples=samples,
             device=device,
             max_new_tokens=max_new_tokens,
-            task_alias_map=task_alias_map,
         )
         baseline_dir = ensure_output_dir(str(output_root / baseline_cfg.get("name", "baseline_qwen3_vl")))
         write_csv(baseline_dir / "predictions.csv", baseline_result["rows"])
@@ -365,7 +268,6 @@ def main() -> None:
             samples=samples,
             device=device,
             max_new_tokens=max_new_tokens,
-            task_alias_map=task_alias_map,
         )
         run_dir = ensure_output_dir(str(output_root / str(run_cfg["name"])))
         write_csv(run_dir / "predictions.csv", run_result["rows"])
@@ -375,8 +277,8 @@ def main() -> None:
 
     leaderboard_rows = sorted(
         leaderboard_rows,
-        key=lambda row: -float(row["microvqa_macro_accuracy"])
-        if row["microvqa_macro_accuracy"] is not None and not math.isnan(row["microvqa_macro_accuracy"])
+        key=lambda row: -float(row["overall_accuracy"])
+        if row["overall_accuracy"] is not None and not math.isnan(row["overall_accuracy"])
         else float("inf"),
     )
     write_csv(output_root / "leaderboard.csv", leaderboard_rows)

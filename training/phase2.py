@@ -26,10 +26,10 @@ from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 from data.dataset import ImageTextDataset
+from data.image_transforms import build_image_transform
 from models.modular_vlm import ModularVLM
 
 try:
@@ -104,19 +104,6 @@ def set_seed(seed: int) -> None:
 def print_main(accelerator: Accelerator, message: str) -> None:
     if accelerator.is_main_process:
         print(message, flush=True)
-
-
-def build_image_transform(image_size: int):
-    return transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225),
-            ),
-        ]
-    )
 
 
 def build_collate_fn(tokenizer, image_transform, max_text_length: int):
@@ -246,6 +233,7 @@ def resolve_stage_data_config(config: Dict[str, Any], stage: str) -> Dict[str, A
             f"No train_manifest configured for Phase 2 stage '{stage}'. "
             "Set data.train_manifest or phase2.stages.<stage>.train_manifest."
         )
+    merged.setdefault("image_preprocessing", "resize")
     return merged
 
 
@@ -349,7 +337,10 @@ def build_dataloader(
     shuffle: bool,
     batch_size: int | None = None,
 ):
-    image_transform = build_image_transform(int(data_cfg["image_size"]))
+    image_transform = build_image_transform(
+        int(data_cfg["image_size"]),
+        preprocessing=str(data_cfg.get("image_preprocessing", "resize")),
+    )
     collate_fn = build_collate_fn(
         tokenizer=tokenizer,
         image_transform=image_transform,
@@ -773,6 +764,7 @@ def main() -> None:
         f"aux_manifest={data_cfg.get('auxiliary_train_manifest')} "
         f"aux_fraction={data_cfg.get('auxiliary_fraction')} "
         f"image_size={data_cfg.get('image_size')} "
+        f"image_preprocessing={data_cfg.get('image_preprocessing')} "
         f"max_text_length={data_cfg.get('max_text_length')} "
         f"num_workers={data_cfg.get('num_workers', 4)}",
     )

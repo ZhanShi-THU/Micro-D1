@@ -49,6 +49,7 @@ phase2:
       image_root: null
       val_image_root: null
       image_size: 448
+      image_preprocessing: "pad_preserve"
       max_text_length: 384
       num_workers: 8
     vqa:
@@ -60,6 +61,7 @@ phase2:
       image_root: null
       val_image_root: null
       image_size: 448
+      image_preprocessing: "pad_preserve"
       max_text_length: 320
       num_workers: 8
 
@@ -69,6 +71,7 @@ data:
   image_root: null
   val_image_root: null
   image_size: 448
+  image_preprocessing: "pad_preserve"
   max_text_length: 384
   num_workers: 8
 

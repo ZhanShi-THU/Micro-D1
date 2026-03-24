@@ -7,13 +7,17 @@ This directory keeps Phase 1/2/3 validation and ablation entrypoints together so
 - `cli.py`
   - the original single-run evaluator, still available through top-level `eval.py`
 - `run_microvqa_suite.py`
-  - packed suite runner for comparing multiple checkpoints on the same MicroVQA manifest
-- `suites/microvqa_phase_progression.yaml`
-  - template for phase progression and ablation experiments
+  - detailed MicroVQA gold-standard runner with EU / HG / EP accuracy and macro average
+- `run_unified_accuracy_suite.py`
+  - simplified unified runner that only reports overall accuracy
+- `suites/microvqa_gold_detailed.yaml`
+  - detailed MicroVQA evaluation template
+- `suites/unified_accuracy_suite.yaml`
+  - simple unified evaluation template
 
 ## Recommended Validation Stack
 
-For basic progression checks, compare:
+For MicroVQA gold-standard checks, compare:
 
 - `phase1_adapter_warmup`
 - `phase2a_instruct`
@@ -46,5 +50,12 @@ That keeps phase progression, prompt ablations, and preprocessing ablations sepa
 cd /home/user/Project_files/project
 
 python evaluation/run_microvqa_suite.py \
-  --suite-config evaluation/suites/microvqa_phase_progression.yaml
+  --suite-config evaluation/suites/microvqa_gold_detailed.yaml
+```
+
+```bash
+cd /home/user/Project_files/project
+
+python evaluation/run_unified_accuracy_suite.py \
+  --suite-config evaluation/suites/unified_accuracy_suite.yaml
 ```

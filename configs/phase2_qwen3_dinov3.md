@@ -27,12 +27,24 @@
 - `instruct`
   - 预期使用 `LLaVA-Instruct-150K`
   - 支持额外配置 `val_manifest` / `val_image_root`，用于训练时验证
+  - 支持 `image_preprocessing`，当前默认 `pad_preserve`
   - 默认 `max_text_length=384`
 - `vqa`
   - 预期使用 `VQAv2`
   - 也支持单独配置 `val_manifest`
+  - 支持 `image_preprocessing`，当前默认 `pad_preserve`
   - 默认 `max_text_length=320`
   - 默认混入 `20%` 的 `LLaVA-Instruct-150K` 样本，避免后段纯 VQA 训练过度覆盖前段的开放式视觉语言能力
+
+`image_preprocessing` 目前支持两种模式：
+
+- `pad_preserve`
+  - 先按比例缩放，让长边贴齐目标尺寸
+  - 再对短边居中 padding 成正方形
+  - 更适合显微图像或长宽比差异较大的样本
+- `resize`
+  - 直接拉伸到 `(image_size, image_size)`
+  - 与旧版本 Phase 2 行为一致
 
 两段都复用项目已有的 caption/instruction 样式 manifest：
 
