@@ -1,5 +1,5 @@
 """
-Phase 3 microscopy Unified VQA training.
+Phase 3 microscopy reasoning-supervised training.
 
 This stage trains:
   - top DINOv3 backbone blocks
@@ -8,7 +8,7 @@ This stage trains:
   - Qwen LoRA parameters
 
 It expects a prior Phase 2 checkpoint as initialization and optimizes
-domain-specific multiple-choice microscopy performance.
+domain-specific microscopy reasoning performance.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from datetime import datetime
 import json
 import math
 import random
-import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
@@ -32,7 +32,8 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 from data.dataset import ImageTextDataset
-from data.image_transforms import build_image_transform
+from data.image_transforms import build_image_transform, pad_and_stack_image_tensors
+from models.generation import greedy_generate, parse_choice_answer
 from models.modular_vlm import ModularVLM
 
 try:
@@ -41,14 +42,8 @@ except ImportError:  # pragma: no cover - optional dependency
     wandb = None
 
 
-ANSWER_REGEX = re.compile(
-    r"(?:^|\b)(?:the\s+)?answer(?:\s+is|:)?\s*\*?\*?\(?([0-9]+)\)?|^\s*\(([0-9]+)\)",
-    re.IGNORECASE,
-)
-
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Phase 3 microscopy Unified VQA training")
+    parser = argparse.ArgumentParser(description="Phase 3 microscopy reasoning-supervised training")
     parser.add_argument(
         "--config",
         type=str,
@@ -187,7 +182,7 @@ def maybe_init_wandb(
         project=wandb_cfg.get("project", "microvqa"),
         entity=wandb_cfg.get("entity"),
         name=wandb_cfg.get("name") or run_name,
-        tags=(wandb_cfg.get("tags") or []) + ["phase3", "unified_vqa"],
+        tags=(wandb_cfg.get("tags") or []) + ["phase3"],
         mode=wandb_cfg.get("mode"),
         config=config,
     )
@@ -213,9 +208,23 @@ def build_collate_fn(
     tokenizer,
     image_transform,
     max_text_length: int,
+    dynamic_batch_padding: bool = True,
 ):
     def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        pixel_values = torch.stack([image_transform(item["image"]) for item in batch])
+        image_tensors = [image_transform(item["image"]) for item in batch]
+        if getattr(image_transform, "mode", "") == "qwen_hybrid" and dynamic_batch_padding:
+            pixel_values = pad_and_stack_image_tensors(
+                image_tensors,
+                patch_size=getattr(image_transform, "patch_size", 1),
+            )
+        else:
+            tensor_shapes = {tuple(tensor.shape) for tensor in image_tensors}
+            if len(tensor_shapes) > 1:
+                raise ValueError(
+                    "Image tensors in this batch have different shapes and cannot be stacked directly. "
+                    "Enable data.dynamic_batch_padding when using qwen_hybrid preprocessing."
+                )
+            pixel_values = torch.stack(image_tensors)
         prompts = [item["text"] for item in batch]
         targets = [item["target_text"] for item in batch]
 
@@ -304,11 +313,14 @@ def build_dataloader(
     image_transform = build_image_transform(
         image_size=int(data_cfg["image_size"]),
         preprocessing=str(data_cfg.get("image_preprocessing", "resize")),
+        dynamic_buckets=data_cfg.get("dynamic_buckets"),
+        patch_size=int(data_cfg.get("patch_size", 16)),
     )
     collate_fn = build_collate_fn(
         tokenizer=tokenizer,
         image_transform=image_transform,
         max_text_length=int(data_cfg["max_text_length"]),
+        dynamic_batch_padding=bool(data_cfg.get("dynamic_batch_padding", True)),
     )
     return DataLoader(
         dataset,
@@ -326,8 +338,17 @@ def resolve_phase3_data_config(config: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("Phase 3 requires data.train_manifest.")
     if data_cfg.get("val_manifest") is None:
         raise ValueError("Phase 3 requires data.val_manifest for validation accuracy.")
-    data_cfg.setdefault("prompt_style", "answer_only")
+    prompt_style = str(data_cfg.get("prompt_style", "reasoning")).strip().lower()
+    if prompt_style != "reasoning":
+        raise ValueError(
+            "Phase 3 training only supports data.prompt_style='reasoning'. "
+            "Keep answer_only as an evaluation-time option, but do not use it for train_phase3.py."
+        )
+    data_cfg["prompt_style"] = "reasoning"
     data_cfg.setdefault("image_preprocessing", "pad_preserve")
+    data_cfg.setdefault("dynamic_buckets", [384, 448, 512])
+    data_cfg.setdefault("patch_size", 16)
+    data_cfg.setdefault("dynamic_batch_padding", True)
     return data_cfg
 
 
@@ -440,7 +461,18 @@ def load_phase3_checkpoint(
             from peft import set_peft_model_state_dict
         except ImportError as exc:
             raise ImportError("Loading a Phase 3 checkpoint with LoRA weights requires 'peft'.") from exc
-        set_peft_model_state_dict(model.llm, lora_state)
+        try:
+            set_peft_model_state_dict(model.llm, lora_state)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Failed to load LoRA weights from the initialization checkpoint. "
+                "This usually means the Phase 3 LoRA configuration does not match the "
+                "checkpoint that produced the stored lora_state. In practice, phase2 "
+                "and phase3 must agree on LoRA rank/target modules when Phase 3 is "
+                "initialized from a Phase 2 checkpoint.\n"
+                f"checkpoint={checkpoint_path}\n"
+                f"phase3_lora_cfg={json.dumps(dict(model.config.get('phase3', {}).get('lora', {})), ensure_ascii=False)}"
+            ) from exc
 
     if resume_training_state:
         if optimizer is None or scheduler is None:
@@ -667,14 +699,6 @@ def run_validation_loss(
     }
 
 
-def parse_choice_answer(text: str) -> int | None:
-    match = ANSWER_REGEX.search(text)
-    if match is None:
-        return None
-    value = match.group(1) or match.group(2)
-    return int(value)
-
-
 def sample_eval_indices(dataset_size: int, max_samples: int | None, seed: int) -> List[int]:
     if max_samples is None or max_samples <= 0 or max_samples >= dataset_size:
         return list(range(dataset_size))
@@ -700,48 +724,16 @@ def generate_answer_text(
     tokenized = tokenizer(prompt, return_tensors="pt")
     input_ids = tokenized["input_ids"].to(device)
     attention_mask = tokenized["attention_mask"].to(device)
-
-    model_inputs = model.build_multimodal_inputs(
+    result = greedy_generate(
+        model=model,
+        tokenizer=tokenizer,
         pixel_values=pixel_values,
         input_ids=input_ids,
         attention_mask=attention_mask,
-        labels=None,
+        max_new_tokens=max_new_tokens,
+        stop_on_first_parsed_answer=True,
     )
-    inputs_embeds = model_inputs["inputs_embeds"]
-    merged_attention_mask = model_inputs["attention_mask"]
-    visual_pos_masks = model_inputs.get("visual_pos_masks")
-    deepstack_visual_embeds = model_inputs.get("deepstack_visual_embeds")
-
-    generated_ids: List[int] = []
-    for _ in range(max_new_tokens):
-        decoder_outputs = model.llm_body.forward(
-            inputs_embeds=inputs_embeds,
-            attention_mask=merged_attention_mask,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-        )
-        hidden_states = decoder_outputs[0]
-        logits = model.lm_head(hidden_states)
-        next_token_id = torch.argmax(logits[:, -1, :], dim=-1)
-        token_id = int(next_token_id.item())
-
-        if tokenizer.eos_token_id is not None and token_id == tokenizer.eos_token_id:
-            break
-
-        generated_ids.append(token_id)
-        next_embed = model.get_text_embeds(next_token_id.unsqueeze(0))
-        inputs_embeds = torch.cat([inputs_embeds, next_embed], dim=1)
-        next_mask = torch.ones((1, 1), dtype=merged_attention_mask.dtype, device=device)
-        merged_attention_mask = torch.cat([merged_attention_mask, next_mask], dim=1)
-        if visual_pos_masks is not None:
-            next_visual_mask = torch.zeros(
-                (visual_pos_masks.size(0), 1),
-                dtype=torch.bool,
-                device=device,
-            )
-            visual_pos_masks = torch.cat([visual_pos_masks, next_visual_mask], dim=1)
-
-    return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+    return result.text
 
 
 def run_validation_accuracy(
@@ -754,18 +746,50 @@ def run_validation_accuracy(
     max_samples: int | None,
     max_new_tokens: int,
     seed: int,
+    sync_file: Path | None = None,
+    wait_timeout_seconds: int = 7200,
+    poll_interval_seconds: float = 2.0,
 ) -> Dict[str, Any] | None:
-    accelerator.wait_for_everyone()
+    if sync_file is not None and accelerator.is_main_process:
+        sync_file.parent.mkdir(parents=True, exist_ok=True)
+        if sync_file.exists():
+            sync_file.unlink()
 
-    metrics: Dict[str, Any] | None = None
-    if accelerator.is_main_process:
-        unwrap_model = accelerator.unwrap_model(model)
-        was_training = unwrap_model.training
-        unwrap_model.eval()
+    if not accelerator.is_main_process:
+        if sync_file is None:
+            return None
+        deadline = time.time() + max(wait_timeout_seconds, 1)
+        while True:
+            if sync_file.exists():
+                try:
+                    payload = json.loads(sync_file.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    time.sleep(poll_interval_seconds)
+                    continue
+                status = str(payload.get("status", "ok"))
+                if status == "ok":
+                    return None
+                raise RuntimeError(
+                    "Phase 3 validation accuracy failed on the main process: "
+                    f"{payload.get('error_type', 'RuntimeError')}: {payload.get('message', 'unknown error')}"
+                )
+            if time.time() > deadline:
+                raise TimeoutError(
+                    "Timed out waiting for the main process to finish Phase 3 validation accuracy. "
+                    f"Waited {wait_timeout_seconds} seconds for {sync_file}."
+                )
+            time.sleep(poll_interval_seconds)
 
+    unwrap_model = accelerator.unwrap_model(model)
+    was_training = unwrap_model.training
+    unwrap_model.eval()
+
+    try:
         image_transform = build_image_transform(
             image_size=int(data_cfg["image_size"]),
             preprocessing=str(data_cfg.get("image_preprocessing", "resize")),
+            dynamic_buckets=data_cfg.get("dynamic_buckets"),
+            patch_size=int(data_cfg.get("patch_size", 16)),
         )
         selected_indices = sample_eval_indices(
             dataset_size=len(dataset),
@@ -802,17 +826,34 @@ def run_validation_accuracy(
             for dataset_name, count in per_dataset_total.items()
             if count > 0
         }
-        metrics = {
+        metrics: Dict[str, Any] | None = {
             "overall_accuracy": total_correct / len(selected_indices) if selected_indices else 0.0,
             "num_samples": len(selected_indices),
             "per_dataset_accuracy": per_dataset_accuracy,
         }
-
+        if sync_file is not None:
+            sync_file.write_text(
+                json.dumps({"status": "ok", "num_samples": metrics["num_samples"]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        return metrics
+    except Exception as exc:
+        if sync_file is not None:
+            sync_file.write_text(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "error_type": exc.__class__.__name__,
+                        "message": str(exc),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        raise
+    finally:
         if was_training:
             unwrap_model.train()
-
-    accelerator.wait_for_everyone()
-    return metrics
 
 
 def main() -> None:
@@ -867,6 +908,8 @@ def main() -> None:
         f"test_manifest={data_cfg.get('test_manifest')} "
         f"image_size={data_cfg.get('image_size')} "
         f"image_preprocessing={data_cfg.get('image_preprocessing')} "
+        f"dynamic_buckets={data_cfg.get('dynamic_buckets')} "
+        f"patch_size={data_cfg.get('patch_size')} "
         f"max_text_length={data_cfg.get('max_text_length')} "
         f"prompt_style={data_cfg.get('prompt_style')} "
         f"num_workers={data_cfg.get('num_workers', 4)}",
@@ -893,12 +936,12 @@ def main() -> None:
     train_dataset = build_dataset(
         manifest_path=str(data_cfg["train_manifest"]),
         image_root=data_cfg.get("image_root"),
-        prompt_style=str(data_cfg.get("prompt_style", "answer_only")),
+        prompt_style=str(data_cfg.get("prompt_style", "reasoning")),
     )
     val_dataset = build_dataset(
         manifest_path=str(data_cfg["val_manifest"]),
         image_root=data_cfg.get("val_image_root") or data_cfg.get("image_root"),
-        prompt_style=str(data_cfg.get("prompt_style", "answer_only")),
+        prompt_style=str(data_cfg.get("prompt_style", "reasoning")),
     )
 
     train_dataloader = build_dataloader(
@@ -1014,11 +1057,18 @@ def main() -> None:
         f"[startup] validation loss every {eval_every} optimizer steps "
         f"(max_batches={eval_loss_max_batches or 'all'})",
     )
-    print_main(
-        accelerator,
-        f"[startup] validation accuracy every {eval_accuracy_every} optimizer steps "
-        f"(max_samples={eval_accuracy_max_samples or 'all'}, max_new_tokens={eval_max_new_tokens})",
-    )
+    if eval_accuracy_every > 0:
+        print_main(
+            accelerator,
+            f"[startup] validation accuracy every {eval_accuracy_every} optimizer steps "
+            f"(max_samples={eval_accuracy_max_samples or 'all'}, max_new_tokens={eval_max_new_tokens})",
+        )
+    else:
+        print_main(
+            accelerator,
+            "[startup] validation accuracy is disabled during training; "
+            "best checkpointing will fall back to validation loss.",
+        )
 
     last_train_loss: float | None = None
     last_val_loss: float | None = None
@@ -1082,6 +1132,8 @@ def main() -> None:
                     f"loss={reduced_loss:.4f} lr={lr:.6e}",
                 )
 
+            previous_best_val_loss = best_val_loss
+            ran_validation_loss = False
             if eval_every > 0 and optimizer_step % eval_every == 0:
                 val_loss_metrics = run_validation_loss(
                     accelerator=accelerator,
@@ -1091,6 +1143,7 @@ def main() -> None:
                 )
                 last_val_loss = float(val_loss_metrics["loss"])
                 best_val_loss = min(best_val_loss, last_val_loss)
+                ran_validation_loss = True
 
                 if accelerator.is_main_process:
                     append_train_log(
@@ -1122,6 +1175,7 @@ def main() -> None:
             accuracy_metrics = None
             previous_best_val_accuracy = best_val_accuracy
             if eval_accuracy_every > 0 and optimizer_step % eval_accuracy_every == 0:
+                accuracy_sync_file = output_dir / ".eval_accuracy_sync" / f"step_{optimizer_step}.json"
                 accuracy_metrics = run_validation_accuracy(
                     accelerator=accelerator,
                     model=model,
@@ -1131,6 +1185,7 @@ def main() -> None:
                     max_samples=eval_accuracy_max_samples,
                     max_new_tokens=eval_max_new_tokens,
                     seed=int(config.get("seed", 42)),
+                    sync_file=accuracy_sync_file,
                 )
                 if accelerator.is_main_process and accuracy_metrics is not None:
                     last_val_accuracy = float(accuracy_metrics["overall_accuracy"])
@@ -1224,6 +1279,26 @@ def main() -> None:
                         checkpoint_metadata=checkpoint_metadata,
                     )
                     print_main(accelerator, f"Updated best-accuracy checkpoint at {best_path}")
+
+                if (
+                    eval_accuracy_every <= 0
+                    and ran_validation_loss
+                    and last_val_loss is not None
+                    and last_val_loss < previous_best_val_loss
+                ):
+                    best_path = save_phase3_checkpoint(
+                        accelerator=accelerator,
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        output_dir=output_dir,
+                        optimizer_step=optimizer_step,
+                        global_step=global_step,
+                        checkpoint_name="phase3_best_loss.pt",
+                        backbone_start_block=backbone_start_block,
+                        checkpoint_metadata=checkpoint_metadata,
+                    )
+                    print_main(accelerator, f"Updated best-loss checkpoint at {best_path}")
 
             if max_steps is not None and optimizer_step >= max_steps:
                 stop_training = True

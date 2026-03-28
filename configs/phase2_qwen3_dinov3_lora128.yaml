@@ -1,4 +1,4 @@
-project_name: "qwen3_dinov3_phase2_mixed"
+project_name: "qwen3_dinov3_phase2_mixed_lora128"
 seed: 42
 
 model:
@@ -29,8 +29,8 @@ phase2:
   mixed_samples_per_epoch: 560000
   lora:
     enabled: true
-    r: 64
-    lora_alpha: 128
+    r: 128
+    lora_alpha: 256
     lora_dropout: 0.05
     target_modules:
       - "q_proj"
@@ -73,7 +73,7 @@ data:
   num_workers: 8
 
 training:
-  output_dir: "./outputs/phase2_qwen3_dinov3"
+  output_dir: "./outputs/phase2_qwen3_dinov3_lora128"
   use_run_subdir: true
   run_name: null
   batch_size: 1
@@ -102,5 +102,6 @@ training:
     tags:
       - "phase2"
       - "qlora"
+      - "lora128"
       - "mixed"
       - "llava_vqav2_scienceqa"

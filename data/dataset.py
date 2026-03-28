@@ -27,8 +27,14 @@ def build_microvqa_prompt(
     return build_multiple_choice_prompt(question, choices, prompt_style=prompt_style)
 
 
-def build_microvqa_target(correct_index: int) -> str:
-    return build_multiple_choice_target(correct_index)
+def build_microvqa_target(
+    correct_index: int,
+    choices: Sequence[str] | None = None,
+) -> str:
+    choice_text = None
+    if choices is not None and 0 <= int(correct_index) < len(choices):
+        choice_text = str(choices[int(correct_index)])
+    return build_multiple_choice_target(correct_index, choice_text=choice_text)
 
 
 class ImageTextDataset(Dataset):
@@ -120,7 +126,10 @@ class ImageTextDataset(Dataset):
         )
         target_text = sample.get(
             "target_text",
-            build_microvqa_target(int(sample["correct_index"])),
+            build_microvqa_target(
+                int(sample["correct_index"]),
+                choices=choices,
+            ),
         )
 
         image_path = self._resolve_microvqa_image_path(sample)

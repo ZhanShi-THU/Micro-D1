@@ -272,12 +272,22 @@ class ModularVLM(nn.Module):
             return self.to(device)
 
         llm_device = self.get_llm_device()
-        if llm_device.type != device.type or llm_device.index != device.index:
+        if llm_device.type != device.type:
             raise RuntimeError(
                 "Quantized LLM was loaded onto a different device than the trainer expects: "
                 f"llm_device={llm_device}, trainer_device={device}. "
                 "Ensure torch.cuda.set_device(local_rank) runs before building the model."
             )
+
+        if device.type == "cuda":
+            expected_index = device.index if device.index is not None else torch.cuda.current_device()
+            llm_index = llm_device.index if llm_device.index is not None else torch.cuda.current_device()
+            if llm_index != expected_index:
+                raise RuntimeError(
+                    "Quantized LLM was loaded onto a different device than the trainer expects: "
+                    f"llm_device={llm_device}, trainer_device={device}. "
+                    "Ensure torch.cuda.set_device(local_rank) runs before building the model."
+                )
 
         self.vision_encoder.to(device)
         self.adapter.to(device)

@@ -29,13 +29,8 @@ from data.unified_vqa import (
     format_choices_for_prompt,
     get_unified_manifest_paths,
 )
+from models.generation import greedy_generate, parse_choice_answer
 from models.modular_vlm import ModularVLM
-
-
-ANSWER_REGEX = re.compile(
-    r"(?:^|\b)(?:the\s+)?answer(?:\s+is|:)?\s*\*?\*?\(?([0-9]+)\)?|^\s*\(([0-9]+)\)",
-    re.IGNORECASE,
-)
 
 CAPTION_PROMPT = "Describe the image in one sentence with fine-grained details."
 
@@ -151,8 +146,18 @@ def resolve_eval_device(device_name: str | None) -> torch.device:
     return device
 
 
-def build_image_transform(image_size: int, preprocessing: str = "resize"):
-    return build_configurable_image_transform(image_size, preprocessing=preprocessing)
+def build_image_transform(
+    image_size: int,
+    preprocessing: str = "resize",
+    dynamic_buckets: Sequence[int] | None = None,
+    patch_size: int = 16,
+):
+    return build_configurable_image_transform(
+        image_size,
+        preprocessing=preprocessing,
+        dynamic_buckets=dynamic_buckets,
+        patch_size=patch_size,
+    )
 
 
 def resolve_prompt_style(config: Dict[str, Any]) -> str:
@@ -254,17 +259,11 @@ def build_baseline_prompt(
 
 def normalize_text(text: str) -> str:
     text = text.strip().lower()
+    import re
+
     text = re.sub(r"[^a-z0-9\u4e00-\u9fff\s]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
-
-
-def parse_choice_answer(text: str) -> int | None:
-    match = ANSWER_REGEX.search(text)
-    if match is None:
-        return None
-    value = match.group(1) or match.group(2)
-    return int(value)
 
 
 def infer_finegrained_bucket(sample: Dict[str, Any]) -> str:
@@ -326,7 +325,12 @@ class ModularVLMEvaluator:
 
         image_size = config["data"]["image_size"]
         preprocessing = str(config["data"].get("image_preprocessing", "resize"))
-        self.image_transform = build_image_transform(image_size, preprocessing=preprocessing)
+        self.image_transform = build_image_transform(
+            image_size,
+            preprocessing=preprocessing,
+            dynamic_buckets=config["data"].get("dynamic_buckets"),
+            patch_size=int(config["data"].get("patch_size", 16)),
+        )
 
         if adapter_checkpoint:
             self.load_checkpoint(adapter_checkpoint)
@@ -373,49 +377,28 @@ class ModularVLMEvaluator:
             set_peft_model_state_dict(self.model.llm, lora_state)
 
     @torch.inference_mode()
-    def generate(self, image: Image.Image, prompt: str, max_new_tokens: int) -> str:
+    def generate(
+        self,
+        image: Image.Image,
+        prompt: str,
+        max_new_tokens: int,
+        *,
+        stop_on_first_parsed_answer: bool = False,
+    ) -> str:
         pixel_values = self.image_transform(image).unsqueeze(0).to(self.device)
         tokenized = self.tokenizer(prompt, return_tensors="pt")
         input_ids = tokenized["input_ids"].to(self.device)
         attention_mask = tokenized["attention_mask"].to(self.device)
-
-        model_inputs = self.model.build_multimodal_inputs(
+        result = greedy_generate(
+            model=self.model,
+            tokenizer=self.tokenizer,
             pixel_values=pixel_values,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            labels=None,
+            max_new_tokens=max_new_tokens,
+            stop_on_first_parsed_answer=stop_on_first_parsed_answer,
         )
-        inputs_embeds = model_inputs["inputs_embeds"]
-        merged_attention_mask = model_inputs["attention_mask"]
-        visual_pos_masks = model_inputs.get("visual_pos_masks")
-        deepstack_visual_embeds = model_inputs.get("deepstack_visual_embeds")
-
-        generated_ids: List[int] = []
-        for _ in range(max_new_tokens):
-            decoder_outputs = self.model.llm_body.forward(
-                inputs_embeds=inputs_embeds,
-                attention_mask=merged_attention_mask,
-                visual_pos_masks=visual_pos_masks,
-                deepstack_visual_embeds=deepstack_visual_embeds,
-            )
-            hidden_states = decoder_outputs[0]
-            logits = self.model.lm_head(hidden_states)
-            next_token_id = torch.argmax(logits[:, -1, :], dim=-1)
-            token_id = int(next_token_id.item())
-
-            if self.tokenizer.eos_token_id is not None and token_id == self.tokenizer.eos_token_id:
-                break
-
-            generated_ids.append(token_id)
-            next_embed = self.model.get_text_embeds(next_token_id.unsqueeze(0))
-            inputs_embeds = torch.cat([inputs_embeds, next_embed], dim=1)
-            next_mask = torch.ones((1, 1), dtype=merged_attention_mask.dtype, device=self.device)
-            merged_attention_mask = torch.cat([merged_attention_mask, next_mask], dim=1)
-            if visual_pos_masks is not None:
-                next_visual_mask = torch.zeros((visual_pos_masks.size(0), 1), dtype=torch.bool, device=self.device)
-                visual_pos_masks = torch.cat([visual_pos_masks, next_visual_mask], dim=1)
-
-        return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        return result.text
 
 
 class BaselineQwenEvaluator:
@@ -562,7 +545,12 @@ def evaluate_finegrained(args: argparse.Namespace, config: Dict[str, Any], devic
         )
         baseline_prompt = build_baseline_prompt(sample["question"], sample["choices"])
 
-        modular_text = modular_model.generate(image, modular_prompt, args.max_new_tokens)
+        modular_text = modular_model.generate(
+            image,
+            modular_prompt,
+            args.max_new_tokens,
+            stop_on_first_parsed_answer=True,
+        )
         baseline_text = baseline_model.generate(image, baseline_prompt, args.max_new_tokens)
 
         modular_pred = parse_choice_answer(modular_text)
@@ -651,7 +639,12 @@ def evaluate_mcq(args: argparse.Namespace, config: Dict[str, Any], device: torch
         )
         baseline_prompt = build_baseline_prompt(sample["question"], sample["choices"])
 
-        modular_text = modular_model.generate(image, modular_prompt, args.max_new_tokens)
+        modular_text = modular_model.generate(
+            image,
+            modular_prompt,
+            args.max_new_tokens,
+            stop_on_first_parsed_answer=True,
+        )
         baseline_text = baseline_model.generate(image, baseline_prompt, args.max_new_tokens)
 
         modular_pred = parse_choice_answer(modular_text)

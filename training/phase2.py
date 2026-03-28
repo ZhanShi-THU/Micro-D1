@@ -6,8 +6,10 @@ This stage trains:
   - visual adapter
   - Qwen LoRA parameters
 
-It expects Phase 1 adapter weights as initialization for the instruct stage,
-and a prior Phase 2 checkpoint as initialization for the VQA stage.
+It expects Phase 1 adapter weights as initialization. The preferred v2
+training path is now a single mixed stage that blends multiple datasets
+within one run, while the older instruct/vqa stages remain available for
+backward compatibility.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ import json
 import math
 import random
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Sequence
 
 import numpy as np
 import torch
@@ -25,11 +27,11 @@ import yaml
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 from data.dataset import ImageTextDataset
-from data.image_transforms import build_image_transform
+from data.image_transforms import build_image_transform, pad_and_stack_image_tensors
 from models.modular_vlm import ModularVLM
 
 try:
@@ -38,7 +40,7 @@ except ImportError:  # pragma: no cover - optional dependency
     wandb = None
 
 
-SUPPORTED_STAGES = {"instruct", "vqa"}
+SUPPORTED_STAGES = {"instruct", "vqa", "mixed"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,9 +108,27 @@ def print_main(accelerator: Accelerator, message: str) -> None:
         print(message, flush=True)
 
 
-def build_collate_fn(tokenizer, image_transform, max_text_length: int):
+def build_collate_fn(
+    tokenizer,
+    image_transform,
+    max_text_length: int,
+    dynamic_batch_padding: bool = True,
+):
     def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        pixel_values = torch.stack([image_transform(item["image"]) for item in batch])
+        image_tensors = [image_transform(item["image"]) for item in batch]
+        if getattr(image_transform, "mode", "") == "qwen_hybrid" and dynamic_batch_padding:
+            pixel_values = pad_and_stack_image_tensors(
+                image_tensors,
+                patch_size=getattr(image_transform, "patch_size", 1),
+            )
+        else:
+            tensor_shapes = {tuple(tensor.shape) for tensor in image_tensors}
+            if len(tensor_shapes) > 1:
+                raise ValueError(
+                    "Image tensors in this batch have different shapes and cannot be stacked directly. "
+                    "Enable data.dynamic_batch_padding when using qwen_hybrid preprocessing."
+                )
+            pixel_values = torch.stack(image_tensors)
         prompts = [item["text"] for item in batch]
         targets = [item["target_text"] for item in batch]
 
@@ -226,6 +246,37 @@ def resolve_stage(args: argparse.Namespace, config: Dict[str, Any]) -> str:
 
 def resolve_stage_data_config(config: Dict[str, Any], stage: str) -> Dict[str, Any]:
     data_cfg = dict(config.get("data", {}))
+    if stage == "mixed":
+        mixture_specs = list(config.get("phase2", {}).get("datasets") or [])
+        if not mixture_specs:
+            raise ValueError(
+                "Phase 2 stage 'mixed' requires phase2.datasets to be configured."
+            )
+
+        normalized_specs: List[Dict[str, Any]] = []
+        for index, raw_spec in enumerate(mixture_specs):
+            spec = {**data_cfg, **dict(raw_spec)}
+            if spec.get("train_manifest") is None:
+                raise ValueError(
+                    f"phase2.datasets[{index}] is missing train_manifest for mixed training."
+                )
+            if spec.get("sampling_weight") in {None, 0, 0.0}:
+                raise ValueError(
+                    f"phase2.datasets[{index}] must define a positive sampling_weight."
+                )
+            normalized_specs.append(spec)
+
+        merged = dict(data_cfg)
+        merged["mixture_datasets"] = normalized_specs
+        merged["mixed_samples_per_epoch"] = config.get("phase2", {}).get("mixed_samples_per_epoch")
+        merged["stage"] = "mixed"
+        merged.setdefault("image_preprocessing", "resize")
+        merged.setdefault("dynamic_buckets", [384, 448, 512])
+        merged.setdefault("patch_size", 16)
+        merged.setdefault("dynamic_batch_padding", True)
+        merged.setdefault("prompt_style", "answer_only")
+        return merged
+
     stage_cfg = dict(config.get("phase2", {}).get("stages", {}).get(stage, {}))
     merged = {**data_cfg, **stage_cfg}
     if merged.get("train_manifest") is None:
@@ -234,10 +285,17 @@ def resolve_stage_data_config(config: Dict[str, Any], stage: str) -> Dict[str, A
             "Set data.train_manifest or phase2.stages.<stage>.train_manifest."
         )
     merged.setdefault("image_preprocessing", "resize")
+    merged.setdefault("dynamic_buckets", [384, 448, 512])
+    merged.setdefault("patch_size", 16)
+    merged.setdefault("dynamic_batch_padding", True)
+    merged.setdefault("prompt_style", "answer_only")
     return merged
 
 
 def has_validation_data(data_cfg: Dict[str, Any]) -> bool:
+    mixture_specs = data_cfg.get("mixture_datasets") or []
+    if mixture_specs:
+        return any(spec.get("val_manifest") is not None for spec in mixture_specs)
     return data_cfg.get("val_manifest") is not None
 
 
@@ -296,10 +354,153 @@ class MixedImageTextDataset(Dataset):
         return sample
 
 
+class WeightedMultiSourceDataset(Dataset):
+    """
+    Build a deterministic logical epoch by sampling from multiple datasets
+    according to configured weights.
+
+    The sampled view is precomputed once so DataLoader workers can index it
+    cheaply without any cross-worker coordination.
+    """
+
+    def __init__(
+        self,
+        *,
+        datasets: Sequence[Dataset],
+        dataset_names: Sequence[str],
+        sampling_weights: Sequence[float],
+        samples_per_epoch: int | None = None,
+        seed: int = 42,
+    ) -> None:
+        if not datasets:
+            raise ValueError("WeightedMultiSourceDataset requires at least one dataset.")
+        if len(datasets) != len(dataset_names) or len(datasets) != len(sampling_weights):
+            raise ValueError("datasets, dataset_names, and sampling_weights must have the same length.")
+
+        self.datasets = list(datasets)
+        self.dataset_names = [str(name) for name in dataset_names]
+        self.sampling_weights = [float(weight) for weight in sampling_weights]
+        if any(weight <= 0.0 for weight in self.sampling_weights):
+            raise ValueError("All sampling_weights must be positive.")
+
+        total_weight = sum(self.sampling_weights)
+        self.normalized_weights = [weight / total_weight for weight in self.sampling_weights]
+        self.dataset_sizes = [len(dataset) for dataset in self.datasets]
+        if any(size <= 0 for size in self.dataset_sizes):
+            raise ValueError("All mixed datasets must be non-empty.")
+
+        self.samples_per_epoch = int(samples_per_epoch or sum(self.dataset_sizes))
+        if self.samples_per_epoch <= 0:
+            raise ValueError("samples_per_epoch must be positive.")
+
+        counts = self._allocate_counts(self.samples_per_epoch, self.normalized_weights)
+        source_ids: List[int] = []
+        local_indices: List[int] = []
+        shuffle_rng = random.Random(seed)
+
+        for source_id, (dataset_size, count) in enumerate(zip(self.dataset_sizes, counts)):
+            if count <= 0:
+                continue
+            source_ids.extend([source_id] * count)
+            local_indices.extend(
+                self._build_source_indices(
+                    dataset_size=dataset_size,
+                    count=count,
+                    seed=seed + (source_id + 1) * 1009,
+                )
+            )
+
+        if len(source_ids) != len(local_indices):
+            raise RuntimeError("Mixed dataset bookkeeping mismatch.")
+
+        order = list(range(len(source_ids)))
+        shuffle_rng.shuffle(order)
+        self.source_ids = [source_ids[index] for index in order]
+        self.local_indices = [local_indices[index] for index in order]
+
+    @staticmethod
+    def _allocate_counts(total_size: int, weights: Sequence[float]) -> List[int]:
+        raw_counts = [weight * total_size for weight in weights]
+        counts = [int(math.floor(value)) for value in raw_counts]
+        remainder = total_size - sum(counts)
+        if remainder > 0:
+            ranked = sorted(
+                range(len(weights)),
+                key=lambda index: raw_counts[index] - counts[index],
+                reverse=True,
+            )
+            for rank_index in range(remainder):
+                counts[ranked[rank_index % len(ranked)]] += 1
+        return counts
+
+    @staticmethod
+    def _build_source_indices(dataset_size: int, count: int, seed: int) -> List[int]:
+        indices: List[int] = []
+        cycle = 0
+        while len(indices) < count:
+            cycle_indices = list(range(dataset_size))
+            cycle_rng = random.Random(seed + cycle)
+            cycle_rng.shuffle(cycle_indices)
+            indices.extend(cycle_indices)
+            cycle += 1
+        return indices[:count]
+
+    def __len__(self) -> int:
+        return len(self.source_ids)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        source_id = self.source_ids[index]
+        sample = dict(self.datasets[source_id][self.local_indices[index]])
+        metadata = dict(sample.get("metadata") or {})
+        metadata["phase2_mix_source"] = self.dataset_names[source_id]
+        metadata["phase2_mix_source_id"] = source_id
+        sample["metadata"] = metadata
+        return sample
+
+
+def summarize_mixture_specs(data_cfg: Dict[str, Any]) -> str:
+    mixture_specs = data_cfg.get("mixture_datasets") or []
+    if not mixture_specs:
+        return ""
+    fragments = []
+    for spec in mixture_specs:
+        fragments.append(
+            f"{spec.get('name', Path(str(spec['train_manifest'])).stem)}"
+            f"(w={float(spec.get('sampling_weight', 0.0)):.3f})"
+        )
+    return ", ".join(fragments)
+
+
 def build_training_dataset(data_cfg: Dict[str, Any], stage: str) -> Dataset:
+    mixture_specs = data_cfg.get("mixture_datasets") or []
+    prompt_style = str(data_cfg.get("prompt_style", "answer_only"))
+    if mixture_specs:
+        datasets: List[Dataset] = []
+        dataset_names: List[str] = []
+        sampling_weights: List[float] = []
+        for spec in mixture_specs:
+            datasets.append(
+                ImageTextDataset(
+                    manifest_path=str(spec["train_manifest"]),
+                    image_root=spec.get("image_root"),
+                    prompt_style=prompt_style,
+                )
+            )
+            dataset_names.append(str(spec.get("name") or Path(str(spec["train_manifest"])).stem))
+            sampling_weights.append(float(spec["sampling_weight"]))
+
+        return WeightedMultiSourceDataset(
+            datasets=datasets,
+            dataset_names=dataset_names,
+            sampling_weights=sampling_weights,
+            samples_per_epoch=data_cfg.get("mixed_samples_per_epoch"),
+            seed=int(data_cfg.get("seed", 42)),
+        )
+
     primary_dataset = ImageTextDataset(
         manifest_path=str(data_cfg["train_manifest"]),
         image_root=data_cfg.get("image_root"),
+        prompt_style=prompt_style,
     )
 
     auxiliary_manifest = data_cfg.get("auxiliary_train_manifest")
@@ -310,6 +511,7 @@ def build_training_dataset(data_cfg: Dict[str, Any], stage: str) -> Dataset:
     auxiliary_dataset = ImageTextDataset(
         manifest_path=str(auxiliary_manifest),
         image_root=data_cfg.get("auxiliary_image_root") or data_cfg.get("image_root"),
+        prompt_style=prompt_style,
     )
     return MixedImageTextDataset(
         primary_dataset=primary_dataset,
@@ -319,12 +521,33 @@ def build_training_dataset(data_cfg: Dict[str, Any], stage: str) -> Dataset:
 
 
 def build_validation_dataset(data_cfg: Dict[str, Any]) -> Dataset:
+    mixture_specs = data_cfg.get("mixture_datasets") or []
+    prompt_style = str(data_cfg.get("prompt_style", "answer_only"))
+    if mixture_specs:
+        datasets: List[Dataset] = []
+        for spec in mixture_specs:
+            if spec.get("val_manifest") is None:
+                continue
+            datasets.append(
+                ImageTextDataset(
+                    manifest_path=str(spec["val_manifest"]),
+                    image_root=spec.get("val_image_root") or spec.get("image_root"),
+                    prompt_style=prompt_style,
+                )
+            )
+        if not datasets:
+            raise ValueError("Validation dataset requested, but no mixed val_manifest is configured.")
+        if len(datasets) == 1:
+            return datasets[0]
+        return ConcatDataset(datasets)
+
     val_manifest = data_cfg.get("val_manifest")
     if val_manifest is None:
         raise ValueError("Validation dataset requested, but val_manifest is not configured.")
     return ImageTextDataset(
         manifest_path=str(val_manifest),
         image_root=data_cfg.get("val_image_root") or data_cfg.get("image_root"),
+        prompt_style=prompt_style,
     )
 
 
@@ -340,11 +563,14 @@ def build_dataloader(
     image_transform = build_image_transform(
         int(data_cfg["image_size"]),
         preprocessing=str(data_cfg.get("image_preprocessing", "resize")),
+        dynamic_buckets=data_cfg.get("dynamic_buckets"),
+        patch_size=int(data_cfg.get("patch_size", 16)),
     )
     collate_fn = build_collate_fn(
         tokenizer=tokenizer,
         image_transform=image_transform,
         max_text_length=int(data_cfg["max_text_length"]),
+        dynamic_batch_padding=bool(data_cfg.get("dynamic_batch_padding", True)),
     )
     return DataLoader(
         dataset,
@@ -716,6 +942,7 @@ def main() -> None:
     data_cfg = resolve_stage_data_config(config, stage)
     phase2_cfg["stage"] = stage
     data_cfg["stage"] = stage
+    data_cfg["seed"] = int(config.get("seed", 42))
 
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     mixed_precision = str(training_cfg.get("mixed_precision", "bf16")).lower()
@@ -765,9 +992,19 @@ def main() -> None:
         f"aux_fraction={data_cfg.get('auxiliary_fraction')} "
         f"image_size={data_cfg.get('image_size')} "
         f"image_preprocessing={data_cfg.get('image_preprocessing')} "
+        f"dynamic_buckets={data_cfg.get('dynamic_buckets')} "
+        f"patch_size={data_cfg.get('patch_size')} "
         f"max_text_length={data_cfg.get('max_text_length')} "
+        f"prompt_style={data_cfg.get('prompt_style')} "
         f"num_workers={data_cfg.get('num_workers', 4)}",
     )
+    if data_cfg.get("mixture_datasets"):
+        print_main(
+            accelerator,
+            "[startup] mixed_datasets="
+            f"{summarize_mixture_specs(data_cfg)} "
+            f"samples_per_epoch={data_cfg.get('mixed_samples_per_epoch') or 'sum(train_sizes)'}",
+        )
     print_main(
         accelerator,
         "[startup] model_settings="

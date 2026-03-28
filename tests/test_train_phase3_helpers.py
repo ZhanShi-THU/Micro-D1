@@ -1,11 +1,21 @@
 from __future__ import annotations
 
-from train_phase3 import parse_choice_answer, sample_eval_indices
+from pathlib import Path
+import sys
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from training.phase3 import parse_choice_answer, sample_eval_indices
 
 
 def test_parse_choice_answer_reads_expected_format() -> None:
     assert parse_choice_answer("The answer is (2)") == 2
     assert parse_choice_answer("the answer is 3") == 3
+    assert parse_choice_answer("(4)") == 4
+    assert parse_choice_answer("(1) because of the observed morphology") == 1
     assert parse_choice_answer("I think it is option two") is None
 
 

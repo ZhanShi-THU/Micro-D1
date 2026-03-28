@@ -1,4 +1,4 @@
-project_name: "qwen3_dinov3_phase2_mixed"
+project_name: "qwen3_dinov3_phase2_mixed_qwen_hybrid"
 seed: 42
 
 model:
@@ -67,13 +67,16 @@ data:
   image_root: null
   val_image_root: null
   image_size: 448
-  image_preprocessing: "pad_preserve"
+  image_preprocessing: "qwen_hybrid"
+  dynamic_buckets: [384, 448, 512]
+  patch_size: 16
+  dynamic_batch_padding: true
   max_text_length: 384
   prompt_style: "reasoning"
   num_workers: 8
 
 training:
-  output_dir: "./outputs/phase2_qwen3_dinov3"
+  output_dir: "./outputs/phase2_qwen3_dinov3_qwen_hybrid"
   use_run_subdir: true
   run_name: null
   batch_size: 1
@@ -102,5 +105,6 @@ training:
     tags:
       - "phase2"
       - "qlora"
+      - "qwen_hybrid"
       - "mixed"
       - "llava_vqav2_scienceqa"

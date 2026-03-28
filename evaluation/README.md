@@ -12,8 +12,12 @@ This directory keeps Phase 1/2/3 validation and ablation entrypoints together so
   - simplified unified runner that only reports overall accuracy
 - `suites/microvqa_gold_detailed.yaml`
   - detailed MicroVQA evaluation template
+- `suites/microvqa_phase2_preprocessing_gold.yaml`
+  - Phase 2 preprocessing experiment template for detailed MicroVQA gold evaluation
 - `suites/unified_accuracy_suite.yaml`
   - simple unified evaluation template
+- `suites/unified_phase2_preprocessing_accuracy.yaml`
+  - Phase 2 preprocessing experiment template for unified overall-accuracy checks
 
 ## Recommended Validation Stack
 
@@ -24,14 +28,20 @@ For MicroVQA gold-standard checks, compare:
 - `phase2b_vqa`
 - `phase3_final`
 
-For Phase 3 ablations, the first set worth testing is:
+For Phase 3 checks, the default path is now the reasoning-supervised configuration.
+The first useful comparison is no longer prompt ablations inside the old answer-only setup, but:
 
-- `phase3_no_backbone_unfreeze`
-- `phase3_resize_448`
-- `phase3_pad_preserve_448`
-- `phase3_answer_only`
-- `phase3_reasoning_prompt`
-- `phase2b_best` vs `phase2b_final` initialization
+- standard `phase2b` initialization vs stronger `phase2b` checkpoints
+- `lora64` vs `lora128`
+- `pad_preserve` vs future `qwen_hybrid` carry-over
+- default reasoning Phase 3 vs future larger reasoning datasets
+
+For Phase 2 preprocessing ablations, the recommended starting matrix is:
+
+- `phase2a_pad_preserve`
+- `phase2a_qwen_hybrid`
+- `phase2b_pad_preserve`
+- `phase2b_qwen_hybrid`
 
 ## Output Convention
 

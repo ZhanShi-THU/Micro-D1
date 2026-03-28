@@ -1,0 +1,53 @@
+suite_name: "unified_phase2_preprocessing_accuracy"
+output_root: "./eval_outputs/unified_phase2_preprocessing_accuracy"
+manifest: "/data1/staging_datasets/unified_vqa/manifests/merged/test.jsonl"
+device: "cuda"
+max_new_tokens: 32
+
+baseline:
+  enabled: false
+  name: "baseline_qwen3_vl"
+  model_path: "/home/user/Project_files/project/local_models/qwen3-vl-8b"
+  prompt_style: "answer_only"
+  max_new_tokens: 96
+
+runs:
+  - name: "phase2a_pad_preserve"
+    enabled: false
+    config: "configs/phase2_qwen3_dinov3.yaml"
+    checkpoint: "/path/to/phase2a_pad_preserve.pt"
+    prompt_style: "answer_only"
+    image_preprocessing: "pad_preserve"
+    image_size: 448
+    max_text_length: 192
+
+  - name: "phase2a_qwen_hybrid"
+    enabled: false
+    config: "configs/phase2_qwen3_dinov3_qwen_hybrid.yaml"
+    checkpoint: "/path/to/phase2a_qwen_hybrid.pt"
+    prompt_style: "answer_only"
+    image_preprocessing: "qwen_hybrid"
+    dynamic_buckets: [384, 448, 512]
+    patch_size: 16
+    image_size: 448
+    max_text_length: 192
+
+  - name: "phase2b_pad_preserve"
+    enabled: false
+    config: "configs/phase2_qwen3_dinov3.yaml"
+    checkpoint: "/path/to/phase2b_pad_preserve.pt"
+    prompt_style: "answer_only"
+    image_preprocessing: "pad_preserve"
+    image_size: 448
+    max_text_length: 192
+
+  - name: "phase2b_qwen_hybrid"
+    enabled: false
+    config: "configs/phase2_qwen3_dinov3_qwen_hybrid.yaml"
+    checkpoint: "/path/to/phase2b_qwen_hybrid.pt"
+    prompt_style: "answer_only"
+    image_preprocessing: "qwen_hybrid"
+    dynamic_buckets: [384, 448, 512]
+    patch_size: 16
+    image_size: 448
+    max_text_length: 192

@@ -25,7 +25,7 @@ runs:
     enabled: false
     config: "configs/phase3_qwen3_dinov3.yaml"
     checkpoint: "/path/to/phase3_best_accuracy.pt"
-    prompt_style: "answer_only"
+    prompt_style: "reasoning"
     image_preprocessing: "pad_preserve"
     image_size: 448
-    max_text_length: 192
+    max_text_length: 512

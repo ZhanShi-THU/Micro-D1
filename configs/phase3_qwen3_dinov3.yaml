@@ -27,8 +27,8 @@ phase3:
   backbone_train_start_block: 20
   lora:
     enabled: true
-    r: 128
-    lora_alpha: 256
+    r: 64
+    lora_alpha: 128
     lora_dropout: 0.05
     target_modules:
       - "q_proj"
@@ -44,17 +44,14 @@ phase3:
   weight_decay: 0.01
 
 data:
-  unified_root: "/data1/staging_datasets/unified_vqa"
-  train_manifest: "/data1/staging_datasets/unified_vqa/manifests/merged/train.jsonl"
-  val_manifest: "/data1/staging_datasets/unified_vqa/manifests/merged/val.jsonl"
-  test_manifest: "/data1/staging_datasets/unified_vqa/manifests/merged/test.jsonl"
+  train_manifest: "/data1/staging_datasets/phase3_reasoning/mmsci_reasoning/train.jsonl"
+  val_manifest: "/data1/staging_datasets/phase3_reasoning/mmsci_reasoning/val.jsonl"
   image_root: null
   val_image_root: null
-  test_image_root: null
   image_size: 448
   image_preprocessing: "pad_preserve"
-  max_text_length: 192
-  prompt_style: "answer_only"
+  max_text_length: 512
+  prompt_style: "reasoning"
   num_workers: 4
 
 training:
@@ -71,14 +68,13 @@ training:
   mixed_precision: "bf16"
   gradient_checkpointing: true
   log_every: 10
-  eval_every: 250
-  eval_accuracy_every: 250
+  eval_every: 1
+  eval_accuracy_every: 0
   eval_max_batches: 64
-  eval_accuracy_max_samples: 512
-  eval_max_new_tokens: 16
-  save_every: 1000
+  eval_accuracy_max_samples: 64
+  eval_max_new_tokens: 64
+  save_every: 20
   save_steps: []
-  device: "cuda"
   wandb:
     enabled: true
     project: "microvqa"
@@ -87,4 +83,5 @@ training:
     mode: null
     tags:
       - "phase3"
-      - "unified_vqa"
+      - "reasoning_only"
+      - "mmsci_reasoning"

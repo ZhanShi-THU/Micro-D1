@@ -84,6 +84,10 @@ def apply_config_overrides(config: Dict[str, Any], run_cfg: Dict[str, Any], mani
         updated["data"]["image_size"] = int(run_cfg["image_size"])
     if run_cfg.get("image_preprocessing") is not None:
         updated["data"]["image_preprocessing"] = str(run_cfg["image_preprocessing"])
+    if run_cfg.get("dynamic_buckets") is not None:
+        updated["data"]["dynamic_buckets"] = list(run_cfg["dynamic_buckets"])
+    if run_cfg.get("patch_size") is not None:
+        updated["data"]["patch_size"] = int(run_cfg["patch_size"])
     if run_cfg.get("prompt_style") is not None:
         updated["data"]["prompt_style"] = str(run_cfg["prompt_style"])
     if run_cfg.get("max_text_length") is not None:
@@ -147,6 +151,8 @@ def evaluate_modular_run(
         "prompt_style": prompt_style,
         "image_preprocessing": config["data"].get("image_preprocessing"),
         "image_size": config["data"].get("image_size"),
+        "dynamic_buckets": config["data"].get("dynamic_buckets"),
+        "patch_size": config["data"].get("patch_size"),
         "parse_success_rate": parse_success / len(rows) if rows else math.nan,
         "mcq_metrics": mcq_summary["models"]["modular_vlm"],
         "num_samples": len(rows),

@@ -2,7 +2,7 @@ suite_name: "microvqa_gold_detailed"
 output_root: "./eval_outputs/microvqa_gold_detailed"
 manifest: "/data1/staging_datasets/unified_vqa/manifests/by_split/microvqa_test.jsonl"
 device: "cuda"
-max_new_tokens: 32
+max_new_tokens: 500
 
 task_alias_map:
   perception: "EU"
@@ -10,7 +10,7 @@ task_alias_map:
   experiment_proposal: "EP"
 
 baseline:
-  enabled: true
+  enabled: false
   name: "baseline_qwen3_vl"
   model_path: "/home/user/Project_files/project/local_models/qwen3-vl-8b"
   prompt_style: "answer_only"
@@ -24,31 +24,34 @@ runs:
     prompt_style: "answer_only"
     image_preprocessing: "pad_preserve"
     image_size: 448
-    max_text_length: 192
+    max_text_length: 512
 
   - name: "phase2a_instruct"
     enabled: false
     config: "configs/phase2_qwen3_dinov3.yaml"
-    checkpoint: "/path/to/phase2_instruct_best.pt"
+    checkpoint: "/home/user/Project_files/project/outputs/phase2_qwen3_dinov3_qwen_hybrid_lora128/phase2_mixed_best.pt"
     prompt_style: "answer_only"
     image_preprocessing: "pad_preserve"
     image_size: 448
-    max_text_length: 192
+    max_text_length: 512
 
-  - name: "phase2b_vqa"
-    enabled: false
-    config: "configs/phase2_qwen3_dinov3.yaml"
-    checkpoint: "/path/to/phase2_vqa_best.pt"
-    prompt_style: "answer_only"
-    image_preprocessing: "pad_preserve"
+  - name: "phase2_mixed_qwen_hybrid_lora128"
+    enabled: true
+    config: "configs/phase2_qwen3_dinov3_qwen_hybrid_lora128.yaml"
+    checkpoint: "/home/user/Project_files/project/outputs/phase2_qwen3_dinov3_qwen_hybrid_lora128/qwen3_dinov3_phase2_mixed_qwen_hybrid_lora128_mixed_20260327_213811/phase2_mixed_step_200.pt"
+    prompt_style: "reasoning"
+    image_preprocessing: "qwen_hybrid"
+    dynamic_buckets: [384, 448, 512]
+    patch_size: 16
     image_size: 448
-    max_text_length: 192
+    max_text_length: 384
+
 
   - name: "phase3_final"
     enabled: false
     config: "configs/phase3_qwen3_dinov3.yaml"
-    checkpoint: "/path/to/phase3_best_accuracy.pt"
-    prompt_style: "answer_only"
+    checkpoint: "/home/user/Project_files/project/outputs/phase3_qwen3_dinov3/qwen3_dinov3_phase3_20260326_102419/phase3_step_220.pt"
+    prompt_style: "reasoning"
     image_preprocessing: "pad_preserve"
     image_size: 448
-    max_text_length: 192
+    max_text_length: 512

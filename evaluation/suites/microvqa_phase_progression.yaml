@@ -43,25 +43,7 @@ runs:
     enabled: false
     config: "configs/phase3_qwen3_dinov3.yaml"
     checkpoint: "/path/to/phase3_best_accuracy.pt"
-    prompt_style: "answer_only"
-    image_preprocessing: "pad_preserve"
-    image_size: 448
-    max_text_length: 192
-
-  - name: "phase3_reasoning_prompt"
-    enabled: false
-    config: "configs/phase3_qwen3_dinov3.yaml"
-    checkpoint: "/path/to/phase3_best_accuracy.pt"
     prompt_style: "reasoning"
     image_preprocessing: "pad_preserve"
     image_size: 448
-    max_text_length: 192
-
-  - name: "phase3_resize_448"
-    enabled: false
-    config: "configs/phase3_qwen3_dinov3.yaml"
-    checkpoint: "/path/to/phase3_best_accuracy.pt"
-    prompt_style: "answer_only"
-    image_preprocessing: "resize"
-    image_size: 448
-    max_text_length: 192
+    max_text_length: 512

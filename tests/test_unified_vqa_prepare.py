@@ -15,7 +15,7 @@ class UnifiedVQAPrepareTests(unittest.TestCase):
         prompt = build_microvqa_prompt("What is shown?", ["cat", "dog"])
         self.assertIn("(0): cat", prompt)
         self.assertIn("(1): dog", prompt)
-        self.assertEqual(build_microvqa_target(1), "The answer is (1)")
+        self.assertEqual(build_microvqa_target(1, ["cat", "dog"]), "The answer is (1): dog")
 
     def test_answer_only_prompt_style_skips_step_by_step_instruction(self) -> None:
         prompt = build_microvqa_prompt(
@@ -117,7 +117,7 @@ class UnifiedVQAPrepareTests(unittest.TestCase):
             correct_index=0,
             metadata={"a": 1},
         )
-        self.assertEqual(record["target_text"], "The answer is (0)")
+        self.assertEqual(record["target_text"], "The answer is (0): left")
         self.assertEqual(record["metadata"]["a"], 1)
 
     def test_resplit_records_groups_by_image_identifier(self) -> None:

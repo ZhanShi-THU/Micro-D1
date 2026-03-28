@@ -8,7 +8,8 @@ from typing import Any, Dict, Iterable, Iterator, List, Sequence
 
 
 REASONING_MULTIPLE_CHOICE_PROMPT_TEMPLATE = """The following is a multiple choice question (with answers) related to the image below.
-Think step by step and then output the answer in the format of "The answer is (X)" at the end.
+The option indices start from 0 and are shown explicitly as (0), (1), (2), ...
+Think step by step, use the option index exactly as shown, and then output the answer in the format of \"The answer is (X)\" at the end.
 
 {question}
 
@@ -17,7 +18,8 @@ Options:
 """
 
 ANSWER_ONLY_MULTIPLE_CHOICE_PROMPT_TEMPLATE = """The following is a multiple choice question (with answers) related to the image below.
-Answer in the format of "The answer is (X)".
+The option indices start from 0 and are shown explicitly as (0), (1), (2), ...
+Answer using the option index exactly as shown in the format of \"The answer is (X)\".
 
 {question}
 
@@ -132,8 +134,25 @@ def build_multiple_choice_prompt(
     )
 
 
-def build_multiple_choice_target(correct_index: int) -> str:
-    return f"The answer is ({correct_index})"
+def build_multiple_choice_target(
+    correct_index: int,
+    *,
+    choice_text: str | None = None,
+    rationale: str | None = None,
+) -> str:
+    lines: List[str] = []
+    if rationale:
+        cleaned_rationale = " ".join(str(rationale).split()).strip()
+        if cleaned_rationale:
+            lines.append(cleaned_rationale)
+
+    answer_line = f"The answer is ({correct_index})"
+    if choice_text is not None:
+        cleaned_choice = " ".join(str(choice_text).split()).strip()
+        if cleaned_choice:
+            answer_line += f": {cleaned_choice}"
+    lines.append(answer_line)
+    return "\n".join(lines)
 
 
 def infer_answer_index(answer: str, choices: Sequence[str]) -> int:
@@ -275,7 +294,10 @@ def build_unified_record(
         "choices": choices,
         "correct_index": int(correct_index),
         "correct_answer": choices[int(correct_index)],
-        "target_text": build_multiple_choice_target(int(correct_index)),
+        "target_text": build_multiple_choice_target(
+            int(correct_index),
+            choice_text=choices[int(correct_index)],
+        ),
         "metadata": metadata,
     }
 

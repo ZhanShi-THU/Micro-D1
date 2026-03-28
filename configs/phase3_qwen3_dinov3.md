@@ -1,6 +1,16 @@
 # Phase 3 配置说明
 
-`phase3_qwen3_dinov3.yaml` 用于最终的显微 `Unified VQA` 任务定向微调。
+`phase3_qwen3_dinov3.yaml` 现在默认用于最终的显微 reasoning-supervised 定向微调。
+
+`phase3_qwen3_dinov3_lora128.yaml` 与它使用同一套 reasoning 数据和训练策略，唯一的核心差别是 LoRA 配置从：
+
+- `r=64, lora_alpha=128`
+
+切换为：
+
+- `r=128, lora_alpha=256`
+
+因此现在不再保留“默认版走旧 answer-only，lora128 版走 reasoning”这种分叉。
 
 ## 模型策略
 
@@ -13,60 +23,71 @@
 
 默认 LoRA 设置：
 
-- `r=128`
-- `lora_alpha=256`
+- `r=64`
+- `lora_alpha=128`
 - `lora_dropout=0.05`
 - `target_modules=[q_proj, k_proj, v_proj, o_proj]`
 
+如果要跑高 rank 版本，直接改用：
+
+- `configs/phase3_qwen3_dinov3_lora128.yaml`
+
 ## 数据配置
 
-Phase 3 默认只使用 `Unified VQA`：
+Phase 3 默认改为使用 reasoning-supervised manifests：
 
-- `data.train_manifest`
-- `data.val_manifest`
-- `data.test_manifest`
-
-主路径默认不混入 `VQAv2` 或 `LLaVA-Instruct`。
+- `data.train_manifest=/data1/staging_datasets/phase3_reasoning/mmsci_reasoning/train.jsonl`
+- `data.val_manifest=/data1/staging_datasets/phase3_reasoning/mmsci_reasoning/val.jsonl`
 
 输入策略：
 
 - `image_preprocessing=pad_preserve`
 - `image_size=448`
-- `max_text_length=192`
-- `prompt_style=answer_only`
+- `max_text_length=512`
+- `prompt_style=reasoning`
 
-`answer_only` 会去掉 `Think step by step`，只保留 `The answer is (X)` 的输出格式约束。代码层面仍保留了 `reasoning` 与 `answer_only` 两种 prompt 风格，后续可以继续做对照实验。
+这条主路径不再以纯 `The answer is (X)` 监督作为默认训练目标，而是使用：
 
-注意：
+```text
+{reason}
 
-- 当前仓库默认 `Unified VQA` 只有 `train/test` merged manifest。
-- `Phase 3` 训练要求显式提供 `data.val_manifest`，因为 best checkpoint 依赖 `val accuracy`。
-- 不建议直接拿 `test_manifest` 充当长期训练的验证集。
+The answer is (X)
+```
+
+因此更适合作为后续大规模 reasoning 数据的默认入口。
+
+当前默认配置已经不再保留旧的 `answer_only + merged unified_vqa train/val` 训练主路径。
+
+需要注意：
+
+- `train_phase3.py` 现在只接受 `data.prompt_style=reasoning`
+- `answer_only` 只继续作为 evaluation 侧的可选 prompt，用于对比和消融
+- 如果在 Phase 3 训练配置里把 `prompt_style` 改回 `answer_only`，训练入口会直接报错
 
 ## 验证与 best checkpoint
 
-Phase 3 同时记录：
+Phase 3 训练过程中默认记录：
 
 - `val/loss`
-- `val/accuracy`
-- `val_accuracy/by_dataset/<dataset>`
 
 默认策略：
 
 - `save_every=1000`
-- `eval_every=250`
-- `eval_accuracy_every=250`
-- `eval_accuracy_max_samples=512`
-- `eval_max_new_tokens=16`
+- `eval_every=5`
+- `eval_accuracy_every=0`
+- `eval_accuracy_max_samples=64`
+- `eval_max_new_tokens=64`
 
-best checkpoint 只按 `val accuracy` 更新，文件名为：
+默认 best checkpoint 改为按 `val loss` 更新，文件名为：
 
-- `phase3_best_accuracy.pt`
+- `phase3_best_loss.pt`
 
 同时仍保留：
 
 - 周期保存：`phase3_step_<step>.pt`
 - 最终保存：`phase3_final.pt`
+
+如果确实需要在训练中同步看生成式指标，可以手动把 `eval_accuracy_every` 改成一个较大的值，再配合较小的 `eval_accuracy_max_samples` 使用；更推荐的主路径仍然是训练时看 `val/loss`，训练后用 `evaluation/` 目录下的离线脚本统一跑准确率。
 
 ## Phase 2 初始化
 
@@ -86,14 +107,14 @@ Phase 3 从完整 `Phase 2` checkpoint 初始化，支持加载：
 
 ## 常用命令
 
-### 从 Phase 2b checkpoint 启动
+### 从 Phase 2 checkpoint 启动
 
 ```bash
 cd /home/user/Project_files/project
 
 accelerate launch --num_processes 8 train_phase3.py \
   --config configs/phase3_qwen3_dinov3.yaml \
-  --phase2-checkpoint /path/to/phase2_vqa_best.pt
+  --phase2-checkpoint /path/to/phase2_reasoning_compatible_checkpoint.pt
 ```
 
 ### 中断后续训

@@ -1,9 +1,12 @@
 # Phase 2 配置说明
 
-`phase2_qwen3_dinov3.yaml` 用于“深度语义融合”阶段，默认路径为：
+`phase2_qwen3_dinov3.yaml` 现在默认使用单阶段 mixed 训练路径，不再把 Phase 2 强制拆成 `instruct -> vqa` 两段：
 
-- `stage=instruct`：先用 `LLaVA-Instruct-150K` 做语义融合热身
-- `stage=vqa`：再用 `VQAv2` 做问答强化
+- `LLaVA-Instruct-150K`
+- `VQAv2`
+- `ScienceQA`
+
+三者会在同一个逻辑 epoch 内按权重混合采样。
 
 ## 模型策略
 
@@ -22,21 +25,23 @@
 
 ## 数据配置
 
-`phase2.stages.instruct` 与 `phase2.stages.vqa` 分别维护两段 curriculum 的 manifest 和长度设置：
+`phase2.datasets` 中为每个数据源单独配置：
 
-- `instruct`
-  - 预期使用 `LLaVA-Instruct-150K`
-  - 支持额外配置 `val_manifest` / `val_image_root`，用于训练时验证
-  - 支持 `image_preprocessing`，当前默认 `pad_preserve`
-  - 默认 `max_text_length=384`
-- `vqa`
-  - 预期使用 `VQAv2`
-  - 也支持单独配置 `val_manifest`
-  - 支持 `image_preprocessing`，当前默认 `pad_preserve`
-  - 默认 `max_text_length=320`
-  - 默认混入 `20%` 的 `LLaVA-Instruct-150K` 样本，避免后段纯 VQA 训练过度覆盖前段的开放式视觉语言能力
+- `name`
+- `train_manifest`
+- `val_manifest`
+- `sampling_weight`
+- 可选 `image_root` / `val_image_root`
 
-`image_preprocessing` 目前支持两种模式：
+当前默认混合比例是：
+
+- `llava_instruct: 0.35`
+- `vqav2: 0.55`
+- `scienceqa: 0.10`
+
+并通过 `phase2.mixed_samples_per_epoch` 控制每个逻辑 epoch 的总采样量。默认值设为 `560000`，大致对齐旧两阶段训练合计看到的样本规模，同时给 `ScienceQA` 一定的重复曝光，但不让它主导整个 Phase 2。
+
+`image_preprocessing` 目前支持三种模式：
 
 - `pad_preserve`
   - 先按比例缩放，让长边贴齐目标尺寸
@@ -45,14 +50,32 @@
 - `resize`
   - 直接拉伸到 `(image_size, image_size)`
   - 与旧版本 Phase 2 行为一致
+- `qwen_hybrid`
+  - 保持宽高比
+  - 将长边约束到有限分桶，如 `[384, 448, 512]`
+  - 将高宽对齐到 `patch_size=16`
+  - 在 collate 阶段按 batch 内最大高宽做 padding
+  - 适合做 Qwen3-inspired 几何预处理实验，同时保持 DINO 侧可控的 token 波动
 
-两段都复用项目已有的 caption/instruction 样式 manifest：
+`LLaVA` 和 `VQAv2` 继续复用项目已有的 caption/instruction 样式 manifest：
 
 ```json
 {
   "image": "/abs/path/to/image.jpg",
   "text": "prompt text",
   "target_text": "supervised answer"
+}
+```
+
+`ScienceQA` 使用 microvqa-style manifest，包含：
+
+```json
+{
+  "image": "/abs/path/to/image.png",
+  "question": "question text\nContext: optional hint",
+  "choices": ["A", "B", "C", "D"],
+  "correct_index": 0,
+  "target_text": "The answer is (0)"
 }
 ```
 
@@ -93,32 +116,20 @@ Phase 2 checkpoint 会保存：
 
 使用方式：
 
-- `instruct` 阶段从 Phase 1 adapter checkpoint 初始化
-- `vqa` 阶段从 `instruct` 阶段输出的 Phase 2 checkpoint 初始化
-- 中断续训使用 `--resume`
+- 默认 `mixed` 阶段直接从 Phase 1 adapter checkpoint 初始化
+- 不再要求先训练 `phase2a` 再训练 `phase2b`
+- 中断续训仍然使用 `--resume`
 
 ## 常用命令
 
-### Phase 2a: instruct 热身
+### Phase 2: mixed 单阶段训练
 
 ```bash
 cd /home/user/Project_files/project
 
 accelerate launch --num_processes 8 train_phase2.py \
   --config configs/phase2_qwen3_dinov3.yaml \
-  --stage instruct \
   --adapter-checkpoint /path/to/phase1_adapter.pt
-```
-
-### Phase 2b: VQAv2 强化
-
-```bash
-cd /home/user/Project_files/project
-
-accelerate launch --num_processes 8 train_phase2.py \
-  --config configs/phase2_qwen3_dinov3.yaml \
-  --stage vqa \
-  --phase2-checkpoint /path/to/phase2_instruct_final.pt
 ```
 
 ### 中断后续训
@@ -128,17 +139,5 @@ cd /home/user/Project_files/project
 
 accelerate launch --num_processes 8 train_phase2.py \
   --config configs/phase2_qwen3_dinov3.yaml \
-  --resume /path/to/phase2_vqa_step_3000.pt
+  --resume /path/to/phase2_mixed_step_3000.pt
 ```
-
-## VQA 混合策略
-
-`stage=vqa` 默认不再是纯 `VQAv2`，而是：
-
-- 主数据集：`VQAv2`
-- 辅助数据集：`LLaVA-Instruct-150K`
-- 默认辅助占比：`0.2`
-
-也就是大约 `80% VQAv2 + 20% instruct` 的训练逻辑。实现上会保证每个逻辑 epoch 都完整覆盖主数据集，再按比例补充辅助数据集样本。
-
-如果你想改这个比例，直接修改 `phase2.stages.vqa.auxiliary_fraction` 即可。

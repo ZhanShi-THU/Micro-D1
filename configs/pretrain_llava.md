@@ -24,10 +24,12 @@
 | 参数 | 值 | 含义 |
 | --- | --- | --- |
 | train_manifest | "...pretrain.jsonl" | 训练数据清单（JSONL 格式） |
+| val_manifest | "...train_val.jsonl" | 验证集清单（从原始 pretrain JSONL 切分得到） |
 | image_root | null | 图片根目录（manifest 中的 image 是绝对路径，所以为 null） |
+| val_image_root | null | 验证集图片根目录；默认与训练一致 |
 | image_size | 336 | 图片 resize 到 336×336 |
-| max_text_length | 256 | token 序列最大长度（prompt + target） |
-| num_workers | 4 | DataLoader 的 worker 进程数 |
+| max_text_length | 320 | token 序列最大长度（prompt + target） |
+| num_workers | 8 | DataLoader 的 worker 进程数 |
 
 # training — 训练配置
 | 参数 | 值 | 含义 |
@@ -39,12 +41,15 @@
 | num_epochs | 1 | 训练轮数 |
 | learning_rate | 1.0e-4 | 学习率 |
 | weight_decay | 0.01 | 权重衰减 |
-| warmup_steps | 500 | 学习率预热步数 |
+| warmup_steps | 1000 | 学习率预热步数 |
 | gradient_accumulation_steps | 8 | 梯度累积步数（effective batch = 1×8 = 8） |
 | max_grad_norm | 1.0 | 梯度裁剪最大范数 |
 | mixed_precision | "bf16" | 混合精度：bf16 / fp16 / none |
 | log_every | 10 | 每多少步打印日志 |
-| save_every | 5000 | 每多少步保存 checkpoint |
+| eval_every | 200 | 每多少个 optimizer step 跑一次验证 |
+| eval_max_batches | 64 | 单次验证最多评估多少个 batch |
+| eval_batch_size | 1 | 验证时每卡 batch size |
+| save_every | 1000 | 每多少步保存 checkpoint |
 | device | "cuda" | 训练设备 |
 
 # training.wandb — 可视化配置
@@ -62,6 +67,7 @@
 ### 几个关键点：
 - `batch_size=1 + gradient_accumulation_steps=8 = effective batch 8`，适合 Adapter 训练
 - `image_size=336`（你改的，比原来的 448 小，可减少显存）
+- 现在 Phase1 也支持 `val_manifest`，训练中会定期记录 `val/loss` 到终端、`train_log.jsonl` 和 wandb
 - `use_deepstack_injection=false` — Phase1 只训 Adapter，DeepStack 后续开启
 - `llm_quantization=8bit` — 现在默认把冻结的 Qwen 以量化方式加载，优先解决单卡显存占用；如果环境里没装 `bitsandbytes`，启动时会直接报清晰错误
 - 每次启动会把日志、checkpoint、`resolved_config.yaml`、`run_info.json` 写进单独的 run 目录；如果使用 `--resume`，则会继续写回原来的 run 目录

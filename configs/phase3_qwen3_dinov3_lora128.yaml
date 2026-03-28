@@ -1,4 +1,4 @@
-project_name: "qwen3_dinov3_phase2_mixed"
+project_name: "qwen3_dinov3_phase3_reasoning_lora128"
 seed: 42
 
 model:
@@ -21,16 +21,14 @@ model:
   adapter_dropout: 0.0
   use_deepstack_injection: true
   deepstack_num_layers: 4
-  adapter_init_checkpoint: "/home/user/Project_files/project/outputs/pretrain_llava/adapter_checkpoint_phase1.pt"
 
-phase2:
-  stage: "mixed"
+phase3:
   resume_from_phase2_checkpoint: null
-  mixed_samples_per_epoch: 560000
+  backbone_train_start_block: 20
   lora:
     enabled: true
-    r: 64
-    lora_alpha: 128
+    r: 128
+    lora_alpha: 256
     lora_dropout: 0.05
     target_modules:
       - "q_proj"
@@ -39,60 +37,44 @@ phase2:
       - "o_proj"
     bias: "none"
   learning_rates:
-    vision_alignment_head: 1.0e-5
-    adapter: 5.0e-5
-    llm_lora: 2.0e-5
+    vision_backbone_top_blocks: 1.0e-6
+    vision_alignment_head: 3.0e-6
+    adapter: 1.5e-5
+    llm_lora: 8.0e-6
   weight_decay: 0.01
-  datasets:
-    - name: "llava_instruct"
-      train_manifest: "/data1/staging_datasets/phase2/llava_instruct_150k/train.jsonl"
-      val_manifest: "/data1/staging_datasets/phase2/llava_instruct_150k/train_val.jsonl"
-      image_root: null
-      val_image_root: null
-      sampling_weight: 0.35
-    - name: "vqav2"
-      train_manifest: "/data1/staging_datasets/phase2/vqav2/train.jsonl"
-      val_manifest: "/data1/staging_datasets/phase2/vqav2/train_val.jsonl"
-      image_root: null
-      val_image_root: null
-      sampling_weight: 0.55
-    - name: "scienceqa"
-      train_manifest: "/data1/staging_datasets/phase2/scienceqa_filtered_reasoning/train.jsonl"
-      val_manifest: "/data1/staging_datasets/phase2/scienceqa_filtered_reasoning/val.jsonl"
-      image_root: null
-      val_image_root: null
-      sampling_weight: 0.10
 
 data:
+  train_manifest: "/data1/staging_datasets/phase3_reasoning/mmsci_reasoning/train.jsonl"
+  val_manifest: "/data1/staging_datasets/phase3_reasoning/mmsci_reasoning/val.jsonl"
   image_root: null
   val_image_root: null
   image_size: 448
   image_preprocessing: "pad_preserve"
-  max_text_length: 384
+  max_text_length: 512
   prompt_style: "reasoning"
-  num_workers: 8
+  num_workers: 4
 
 training:
-  output_dir: "./outputs/phase2_qwen3_dinov3"
+  output_dir: "./outputs/phase3_qwen3_dinov3_reasoning_lora128"
   use_run_subdir: true
   run_name: null
   batch_size: 1
+  eval_batch_size: 1
   num_epochs: 1
   max_steps: null
-  warmup_steps: 500
+  warmup_steps: 30
   gradient_accumulation_steps: 8
   max_grad_norm: 1.0
   mixed_precision: "bf16"
   gradient_checkpointing: true
   log_every: 10
   eval_every: 5
+  eval_accuracy_every: 0
   eval_max_batches: 64
-  eval_batch_size: 1
-  save_every: 50
+  eval_accuracy_max_samples: 64
+  eval_max_new_tokens: 64
+  save_every: 1000
   save_steps: []
-  best_checkpoint_min_loss: 2.5
-  save_loss_thresholds: []
-  device: "cuda"
   wandb:
     enabled: true
     project: "microvqa"
@@ -100,7 +82,7 @@ training:
     name: null
     mode: null
     tags:
-      - "phase2"
-      - "qlora"
-      - "mixed"
-      - "llava_vqav2_scienceqa"
+      - "phase3"
+      - "reasoning_only"
+      - "mmsci_reasoning"
+      - "lora128"

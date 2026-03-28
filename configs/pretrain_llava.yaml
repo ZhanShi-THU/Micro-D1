@@ -23,7 +23,9 @@ model:
 
 data:
   train_manifest: "/data1/LLaVA-Pretrain/phase1/pretrain.jsonl"
+  val_manifest: "/data1/LLaVA-Pretrain/phase1/train_val.jsonl"
   image_root: null
+  val_image_root: null
   image_size: 336
   max_text_length: 320
   num_workers: 8
@@ -41,6 +43,9 @@ training:
   max_grad_norm: 1.0
   mixed_precision: "bf16"
   log_every: 10
+  eval_every: 200
+  eval_max_batches: 64
+  eval_batch_size: 1
   save_every: 1000
   device: "cuda"
   wandb:

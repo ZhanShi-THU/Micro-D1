@@ -238,20 +238,43 @@ def build_collate_fn(tokenizer, image_transform, max_text_length: int):
 def build_dataloader(config: Dict[str, Any], tokenizer):
     data_cfg = config["data"]
     manifest_path = data_cfg.get("train_manifest")
+    return build_manifest_dataloader(
+        manifest_path=manifest_path,
+        image_root=data_cfg.get("image_root"),
+        image_size=int(data_cfg["image_size"]),
+        max_text_length=int(data_cfg["max_text_length"]),
+        batch_size=int(config["training"]["batch_size"]),
+        num_workers=int(data_cfg.get("num_workers", 4)),
+        tokenizer=tokenizer,
+        shuffle=True,
+    )
+
+
+def build_manifest_dataloader(
+    *,
+    manifest_path: str | None,
+    image_root: str | None,
+    image_size: int,
+    max_text_length: int,
+    batch_size: int,
+    num_workers: int,
+    tokenizer,
+    shuffle: bool,
+):
     if manifest_path is None:
         print_main("No train_manifest configured. Exiting.")
         return None
 
     dataset = ImageTextDataset(
         manifest_path=manifest_path,
-        image_root=data_cfg.get("image_root"),
+        image_root=image_root,
     )
 
-    image_transform = build_image_transform(data_cfg["image_size"])
+    image_transform = build_image_transform(image_size)
     collate_fn = build_collate_fn(
         tokenizer=tokenizer,
         image_transform=image_transform,
-        max_text_length=data_cfg["max_text_length"],
+        max_text_length=max_text_length,
     )
 
     sampler = None
@@ -260,18 +283,37 @@ def build_dataloader(config: Dict[str, Any], tokenizer):
             dataset,
             num_replicas=get_world_size(),
             rank=get_rank(),
-            shuffle=True,
+            shuffle=shuffle,
             drop_last=False,
         )
 
     return DataLoader(
         dataset,
-        batch_size=config["training"]["batch_size"],
-        shuffle=sampler is None,
+        batch_size=batch_size,
+        shuffle=shuffle and sampler is None,
         sampler=sampler,
-        num_workers=data_cfg.get("num_workers", 4),
+        num_workers=num_workers,
         pin_memory=True,
         collate_fn=collate_fn,
+    )
+
+
+def build_validation_dataloader(config: Dict[str, Any], tokenizer):
+    data_cfg = config["data"]
+    val_manifest = data_cfg.get("val_manifest")
+    if val_manifest is None:
+        return None
+
+    eval_batch_size = int(config["training"].get("eval_batch_size", config["training"]["batch_size"]))
+    return build_manifest_dataloader(
+        manifest_path=val_manifest,
+        image_root=data_cfg.get("val_image_root", data_cfg.get("image_root")),
+        image_size=int(data_cfg["image_size"]),
+        max_text_length=int(data_cfg["max_text_length"]),
+        batch_size=eval_batch_size,
+        num_workers=int(data_cfg.get("num_workers", 4)),
+        tokenizer=tokenizer,
+        shuffle=False,
     )
 
 
@@ -437,6 +479,54 @@ def append_train_log(log_path: Path, payload: Dict[str, Any]) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+@torch.no_grad()
+def evaluate_loss(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+    mixed_precision: str,
+    max_batches: int | None = None,
+) -> Dict[str, float]:
+    autocast_dtype = resolve_autocast_dtype(mixed_precision)
+    use_amp = device.type == "cuda" and autocast_dtype is not None
+
+    was_training = model.training
+    model.eval()
+
+    total_loss = 0.0
+    total_batches = 0
+    for batch_idx, batch in enumerate(dataloader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
+
+        batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
+        with torch.amp.autocast(
+            device_type=device.type,
+            dtype=autocast_dtype,
+            enabled=use_amp,
+        ):
+            outputs = model(**batch)
+            loss = outputs.loss
+            if loss is None:
+                raise RuntimeError("Model forward pass did not return a loss tensor during validation.")
+        total_loss += float(loss.detach().item())
+        total_batches += 1
+
+    if total_batches == 0:
+        raise RuntimeError("Validation dataloader produced zero batches.")
+
+    avg_loss = total_loss / total_batches
+    avg_loss = maybe_reduce_scalar(avg_loss, device)
+
+    if was_training:
+        model.train()
+
+    return {
+        "loss": avg_loss,
+        "num_batches": float(total_batches),
+    }
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -468,6 +558,7 @@ def main() -> None:
     print_main(
         "[startup] data_settings="
         f"manifest={data_cfg.get('train_manifest')} "
+        f"val_manifest={data_cfg.get('val_manifest')} "
         f"image_size={data_cfg.get('image_size')} "
         f"max_text_length={data_cfg.get('max_text_length')} "
         f"num_workers={data_cfg.get('num_workers', 4)}"
@@ -528,6 +619,15 @@ def main() -> None:
         f"world_size={get_world_size()}"
     )
 
+    val_dataloader = build_validation_dataloader(config, tokenizer)
+    val_dataset_size = 0
+    if val_dataloader is not None:
+        val_dataset_size = len(val_dataloader.dataset)
+        print_main(
+            f"[startup] val dataloader ready with {val_dataset_size} samples, "
+            f"{len(val_dataloader)} local batches/eval"
+        )
+
     start_step = 0
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
@@ -579,15 +679,27 @@ def main() -> None:
     max_grad_norm = float(train_cfg["max_grad_norm"])
     log_every = int(train_cfg["log_every"])
     save_every = int(args.save_every if args.save_every is not None else train_cfg["save_every"])
+    eval_every = int(train_cfg.get("eval_every", 0))
+    eval_max_batches_raw = train_cfg.get("eval_max_batches")
+    eval_max_batches = None if eval_max_batches_raw in {None, 0} else int(eval_max_batches_raw)
     wandb_run = maybe_init_wandb(config, args)
     if wandb_run is not None:
         wandb_run.summary["dataset_size"] = dataset_size
         wandb_run.summary["batches_per_epoch"] = len(dataloader)
         wandb_run.summary["total_update_steps"] = total_update_steps
+        if val_dataloader is not None:
+            wandb_run.summary["val_dataset_size"] = val_dataset_size
+            wandb_run.summary["val_batches"] = len(val_dataloader)
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
     print_main("[startup] starting training loop...")
+    if val_dataloader is not None and eval_every > 0:
+        print_main(
+            "[startup] validation is enabled "
+            f"every {eval_every} optimizer steps "
+            f"(max_batches={eval_max_batches if eval_max_batches is not None else 'all'})"
+        )
 
     global_step = start_step
     optimizer_step = 0
@@ -669,6 +781,41 @@ def main() -> None:
                     f"epoch={epoch} step={optimizer_step} "
                     f"loss={reduced_loss:.4f} lr={lr:.6e}"
                 )
+
+            if val_dataloader is not None and eval_every > 0 and optimizer_step % eval_every == 0:
+                metrics = evaluate_loss(
+                    model=model,
+                    dataloader=val_dataloader,
+                    device=device,
+                    mixed_precision=str(train_cfg.get("mixed_precision", "none")),
+                    max_batches=eval_max_batches,
+                )
+                val_loss = metrics["loss"]
+                val_record = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "optimizer_step": optimizer_step,
+                    "val_loss": val_loss,
+                    "val_num_batches": metrics["num_batches"],
+                }
+                if is_main_process():
+                    append_train_log(log_path, val_record)
+                print_main(
+                    f"[validation] epoch={epoch} step={optimizer_step} "
+                    f"val_loss={val_loss:.4f} "
+                    f"batches={int(metrics['num_batches'])}"
+                )
+                if wandb_run is not None:
+                    wandb.log(
+                        {
+                            "val/loss": val_loss,
+                            "val/epoch": epoch,
+                            "val/global_step": global_step,
+                            "val/optimizer_step": optimizer_step,
+                            "val/num_batches": metrics["num_batches"],
+                        },
+                        step=optimizer_step,
+                    )
 
             if save_every > 0 and optimizer_step % save_every == 0 and is_main_process():
                 checkpoint_path = save_adapter_checkpoint(
