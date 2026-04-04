@@ -35,6 +35,13 @@ from data.dataset import ImageTextDataset
 from data.image_transforms import build_image_transform, pad_and_stack_image_tensors
 from models.generation import greedy_generate, parse_choice_answer
 from models.modular_vlm import ModularVLM
+from models.state_loading import load_matching_state_dict
+from training.resource_tracking import (
+    collect_local_resource_summary,
+    reset_peak_memory_stats_for_device,
+    try_write_aggregate_resource_summary,
+    write_local_resource_summary,
+)
 
 try:
     import wandb
@@ -432,13 +439,24 @@ def load_phase3_checkpoint(
     resume_training_state: bool = False,
 ) -> Dict[str, Any]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    adapter_type = str(model.model_cfg.get("adapter_type", "mlp")).strip().lower()
+    alignment_head_type = str(
+        getattr(model.vision_encoder, "alignment_head_type", model.model_cfg.get("alignment_head_type", "dinotxt"))
+    ).strip().lower()
 
     if "adapter" in checkpoint:
-        model.adapter.load_state_dict(checkpoint["adapter"], strict=True)
+        load_matching_state_dict(
+            model.adapter,
+            checkpoint["adapter"],
+            module_name="adapter",
+            strict=adapter_type == "mlp",
+        )
     if "vision_alignment_head" in checkpoint:
-        model.vision_encoder.alignment_head.load_state_dict(
+        load_matching_state_dict(
+            model.vision_encoder.alignment_head,
             checkpoint["vision_alignment_head"],
-            strict=True,
+            module_name="vision_alignment_head",
+            strict=alignment_head_type == "dinotxt",
         )
 
     backbone_state = checkpoint.get("vision_backbone_top_blocks")
@@ -1074,270 +1092,306 @@ def main() -> None:
     last_val_loss: float | None = None
     last_val_accuracy: float | None = None
     stop_training = False
+    final_checkpoint = None
+    run_status = "completed"
+    interrupted = False
+    error_type: str | None = None
+    error_message: str | None = None
+    training_start_time = time.perf_counter()
+    reset_peak_memory_stats_for_device(accelerator.device)
 
-    for epoch in range(num_epochs):
-        print_main(accelerator, f"[epoch] starting epoch {epoch + 1}/{num_epochs}")
-        for batch_idx, batch in enumerate(train_dataloader, start=1):
-            with accelerator.accumulate(model):
-                outputs = model(**batch)
-                loss = outputs.loss
-                if loss is None:
-                    raise RuntimeError("Model forward pass did not return a loss tensor.")
-                accelerator.backward(loss)
+    try:
+        for epoch in range(num_epochs):
+            print_main(accelerator, f"[epoch] starting epoch {epoch + 1}/{num_epochs}")
+            for batch_idx, batch in enumerate(train_dataloader, start=1):
+                with accelerator.accumulate(model):
+                    outputs = model(**batch)
+                    loss = outputs.loss
+                    if loss is None:
+                        raise RuntimeError("Model forward pass did not return a loss tensor.")
+                    accelerator.backward(loss)
 
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(
-                        [param for param in model.parameters() if param.requires_grad],
-                        max_grad_norm,
-                    )
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(
+                            [param for param in model.parameters() if param.requires_grad],
+                            max_grad_norm,
+                        )
+                        optimizer.step()
+                        scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
 
-            global_step += 1
-            if not accelerator.sync_gradients:
-                continue
+                global_step += 1
+                if not accelerator.sync_gradients:
+                    continue
 
-            optimizer_step += 1
-            reduced_loss = accelerator.gather(loss.detach().float().reshape(1)).mean().item()
-            last_train_loss = reduced_loss
-            lr = scheduler.get_last_lr()[0]
+                optimizer_step += 1
+                reduced_loss = accelerator.gather(loss.detach().float().reshape(1)).mean().item()
+                last_train_loss = reduced_loss
+                lr = scheduler.get_last_lr()[0]
 
-            if wandb_run is not None:
-                wandb_payload = {
-                    "train/loss": reduced_loss,
-                    "train/lr": lr,
-                    "train/epoch": epoch,
-                    "train/global_step": global_step,
-                    "train/optimizer_step": optimizer_step,
-                }
-                if last_val_loss is not None:
-                    wandb_payload["train/val_loss_gap"] = reduced_loss - last_val_loss
-                wandb.log(wandb_payload, step=optimizer_step)
-
-            if optimizer_step % log_every == 0:
-                log_record = {
-                    "stage": "phase3",
-                    "epoch": epoch,
-                    "global_step": global_step,
-                    "optimizer_step": optimizer_step,
-                    "loss": reduced_loss,
-                    "lr": lr,
-                }
-                if accelerator.is_main_process:
-                    append_train_log(log_path, log_record)
-                print_main(
-                    accelerator,
-                    f"stage=phase3 epoch={epoch} step={optimizer_step} "
-                    f"loss={reduced_loss:.4f} lr={lr:.6e}",
-                )
-
-            previous_best_val_loss = best_val_loss
-            ran_validation_loss = False
-            if eval_every > 0 and optimizer_step % eval_every == 0:
-                val_loss_metrics = run_validation_loss(
-                    accelerator=accelerator,
-                    model=model,
-                    dataloader=val_loss_dataloader,
-                    max_batches=eval_loss_max_batches,
-                )
-                last_val_loss = float(val_loss_metrics["loss"])
-                best_val_loss = min(best_val_loss, last_val_loss)
-                ran_validation_loss = True
-
-                if accelerator.is_main_process:
-                    append_train_log(
-                        log_path,
-                        {
-                            "stage": "phase3",
-                            "event": "validation_loss",
-                            "epoch": epoch,
-                            "global_step": global_step,
-                            "optimizer_step": optimizer_step,
-                            "train_loss": reduced_loss,
-                            "val_loss": last_val_loss,
-                            "val_batches": int(val_loss_metrics["num_batches"]),
-                        },
-                    )
-                print_main(
-                    accelerator,
-                    f"[validation_loss] step={optimizer_step} val_loss={last_val_loss:.4f}",
-                )
                 if wandb_run is not None:
-                    wandb.log(
-                        {
-                            "val/loss": last_val_loss,
-                            "val/num_batches": val_loss_metrics["num_batches"],
-                        },
-                        step=optimizer_step,
-                    )
+                    wandb_payload = {
+                        "train/loss": reduced_loss,
+                        "train/lr": lr,
+                        "train/epoch": epoch,
+                        "train/global_step": global_step,
+                        "train/optimizer_step": optimizer_step,
+                    }
+                    if last_val_loss is not None:
+                        wandb_payload["train/val_loss_gap"] = reduced_loss - last_val_loss
+                    wandb.log(wandb_payload, step=optimizer_step)
 
-            accuracy_metrics = None
-            previous_best_val_accuracy = best_val_accuracy
-            if eval_accuracy_every > 0 and optimizer_step % eval_accuracy_every == 0:
-                accuracy_sync_file = output_dir / ".eval_accuracy_sync" / f"step_{optimizer_step}.json"
-                accuracy_metrics = run_validation_accuracy(
-                    accelerator=accelerator,
-                    model=model,
-                    tokenizer=tokenizer,
-                    dataset=val_dataset,
-                    data_cfg=data_cfg,
-                    max_samples=eval_accuracy_max_samples,
-                    max_new_tokens=eval_max_new_tokens,
-                    seed=int(config.get("seed", 42)),
-                    sync_file=accuracy_sync_file,
-                )
-                if accelerator.is_main_process and accuracy_metrics is not None:
-                    last_val_accuracy = float(accuracy_metrics["overall_accuracy"])
-                    best_val_accuracy = max(best_val_accuracy, last_val_accuracy)
-                    log_payload = {
+                if optimizer_step % log_every == 0:
+                    log_record = {
                         "stage": "phase3",
-                        "event": "validation_accuracy",
                         "epoch": epoch,
                         "global_step": global_step,
                         "optimizer_step": optimizer_step,
-                        "val_accuracy": last_val_accuracy,
-                        "num_samples": int(accuracy_metrics["num_samples"]),
-                        "per_dataset_accuracy": accuracy_metrics["per_dataset_accuracy"],
+                        "loss": reduced_loss,
+                        "lr": lr,
                     }
-                    append_train_log(log_path, log_payload)
+                    if accelerator.is_main_process:
+                        append_train_log(log_path, log_record)
                     print_main(
                         accelerator,
-                        f"[validation_accuracy] step={optimizer_step} "
-                        f"val_accuracy={last_val_accuracy:.4f} "
-                        f"samples={int(accuracy_metrics['num_samples'])}",
+                        f"stage=phase3 epoch={epoch} step={optimizer_step} "
+                        f"loss={reduced_loss:.4f} lr={lr:.6e}",
+                    )
+
+                previous_best_val_loss = best_val_loss
+                ran_validation_loss = False
+                if eval_every > 0 and optimizer_step % eval_every == 0:
+                    val_loss_metrics = run_validation_loss(
+                        accelerator=accelerator,
+                        model=model,
+                        dataloader=val_loss_dataloader,
+                        max_batches=eval_loss_max_batches,
+                    )
+                    last_val_loss = float(val_loss_metrics["loss"])
+                    best_val_loss = min(best_val_loss, last_val_loss)
+                    ran_validation_loss = True
+
+                    if accelerator.is_main_process:
+                        append_train_log(
+                            log_path,
+                            {
+                                "stage": "phase3",
+                                "event": "validation_loss",
+                                "epoch": epoch,
+                                "global_step": global_step,
+                                "optimizer_step": optimizer_step,
+                                "train_loss": reduced_loss,
+                                "val_loss": last_val_loss,
+                                "val_batches": int(val_loss_metrics["num_batches"]),
+                            },
+                        )
+                    print_main(
+                        accelerator,
+                        f"[validation_loss] step={optimizer_step} val_loss={last_val_loss:.4f}",
                     )
                     if wandb_run is not None:
-                        metrics_payload = {
-                            "val/accuracy": last_val_accuracy,
-                            "val/accuracy_num_samples": accuracy_metrics["num_samples"],
+                        wandb.log(
+                            {
+                                "val/loss": last_val_loss,
+                                "val/num_batches": val_loss_metrics["num_batches"],
+                            },
+                            step=optimizer_step,
+                        )
+
+                accuracy_metrics = None
+                previous_best_val_accuracy = best_val_accuracy
+                if eval_accuracy_every > 0 and optimizer_step % eval_accuracy_every == 0:
+                    accuracy_sync_file = output_dir / ".eval_accuracy_sync" / f"step_{optimizer_step}.json"
+                    accuracy_metrics = run_validation_accuracy(
+                        accelerator=accelerator,
+                        model=model,
+                        tokenizer=tokenizer,
+                        dataset=val_dataset,
+                        data_cfg=data_cfg,
+                        max_samples=eval_accuracy_max_samples,
+                        max_new_tokens=eval_max_new_tokens,
+                        seed=int(config.get("seed", 42)),
+                        sync_file=accuracy_sync_file,
+                    )
+                    if accelerator.is_main_process and accuracy_metrics is not None:
+                        last_val_accuracy = float(accuracy_metrics["overall_accuracy"])
+                        best_val_accuracy = max(best_val_accuracy, last_val_accuracy)
+                        log_payload = {
+                            "stage": "phase3",
+                            "event": "validation_accuracy",
+                            "epoch": epoch,
+                            "global_step": global_step,
+                            "optimizer_step": optimizer_step,
+                            "val_accuracy": last_val_accuracy,
+                            "num_samples": int(accuracy_metrics["num_samples"]),
+                            "per_dataset_accuracy": accuracy_metrics["per_dataset_accuracy"],
                         }
-                        for dataset_name, accuracy in accuracy_metrics["per_dataset_accuracy"].items():
-                            metrics_payload[
-                                f"val_accuracy/by_dataset/{sanitize_metric_key(dataset_name)}"
-                            ] = accuracy
-                        wandb.log(metrics_payload, step=optimizer_step)
+                        append_train_log(log_path, log_payload)
+                        print_main(
+                            accelerator,
+                            f"[validation_accuracy] step={optimizer_step} "
+                            f"val_accuracy={last_val_accuracy:.4f} "
+                            f"samples={int(accuracy_metrics['num_samples'])}",
+                        )
+                        if wandb_run is not None:
+                            metrics_payload = {
+                                "val/accuracy": last_val_accuracy,
+                                "val/accuracy_num_samples": accuracy_metrics["num_samples"],
+                            }
+                            for dataset_name, accuracy in accuracy_metrics["per_dataset_accuracy"].items():
+                                metrics_payload[
+                                    f"val_accuracy/by_dataset/{sanitize_metric_key(dataset_name)}"
+                                ] = accuracy
+                            wandb.log(metrics_payload, step=optimizer_step)
 
-            if accelerator.is_main_process:
-                checkpoint_metadata = {
-                    "stage": "phase3",
-                    "loss": reduced_loss,
-                    "lr": lr,
-                    "best_val_loss": best_val_loss,
-                    "best_val_accuracy": best_val_accuracy,
-                }
-                if last_val_loss is not None:
-                    checkpoint_metadata["val_loss"] = last_val_loss
-                if last_val_accuracy is not None:
-                    checkpoint_metadata["val_accuracy"] = last_val_accuracy
+                if accelerator.is_main_process:
+                    checkpoint_metadata = {
+                        "stage": "phase3",
+                        "loss": reduced_loss,
+                        "lr": lr,
+                        "best_val_loss": best_val_loss,
+                        "best_val_accuracy": best_val_accuracy,
+                    }
+                    if last_val_loss is not None:
+                        checkpoint_metadata["val_loss"] = last_val_loss
+                    if last_val_accuracy is not None:
+                        checkpoint_metadata["val_accuracy"] = last_val_accuracy
 
-                if save_every > 0 and optimizer_step % save_every == 0:
-                    checkpoint_path = save_phase3_checkpoint(
-                        accelerator=accelerator,
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        output_dir=output_dir,
-                        optimizer_step=optimizer_step,
-                        global_step=global_step,
-                        checkpoint_name=f"phase3_step_{optimizer_step}.pt",
-                        backbone_start_block=backbone_start_block,
-                        checkpoint_metadata=checkpoint_metadata,
-                    )
-                    print_main(accelerator, f"Saved periodic checkpoint to {checkpoint_path}")
+                    if save_every > 0 and optimizer_step % save_every == 0:
+                        checkpoint_path = save_phase3_checkpoint(
+                            accelerator=accelerator,
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            output_dir=output_dir,
+                            optimizer_step=optimizer_step,
+                            global_step=global_step,
+                            checkpoint_name=f"phase3_step_{optimizer_step}.pt",
+                            backbone_start_block=backbone_start_block,
+                            checkpoint_metadata=checkpoint_metadata,
+                        )
+                        print_main(accelerator, f"Saved periodic checkpoint to {checkpoint_path}")
 
-                if optimizer_step in save_steps:
-                    checkpoint_path = save_phase3_checkpoint(
-                        accelerator=accelerator,
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        output_dir=output_dir,
-                        optimizer_step=optimizer_step,
-                        global_step=global_step,
-                        checkpoint_name=f"phase3_milestone_step_{optimizer_step}.pt",
-                        backbone_start_block=backbone_start_block,
-                        checkpoint_metadata=checkpoint_metadata,
-                    )
-                    print_main(accelerator, f"Saved milestone checkpoint to {checkpoint_path}")
+                    if optimizer_step in save_steps:
+                        checkpoint_path = save_phase3_checkpoint(
+                            accelerator=accelerator,
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            output_dir=output_dir,
+                            optimizer_step=optimizer_step,
+                            global_step=global_step,
+                            checkpoint_name=f"phase3_milestone_step_{optimizer_step}.pt",
+                            backbone_start_block=backbone_start_block,
+                            checkpoint_metadata=checkpoint_metadata,
+                        )
+                        print_main(accelerator, f"Saved milestone checkpoint to {checkpoint_path}")
 
-                if (
-                    accuracy_metrics is not None
-                    and last_val_accuracy is not None
-                    and last_val_accuracy > previous_best_val_accuracy
-                ):
-                    best_path = save_phase3_checkpoint(
-                        accelerator=accelerator,
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        output_dir=output_dir,
-                        optimizer_step=optimizer_step,
-                        global_step=global_step,
-                        checkpoint_name="phase3_best_accuracy.pt",
-                        backbone_start_block=backbone_start_block,
-                        checkpoint_metadata=checkpoint_metadata,
-                    )
-                    print_main(accelerator, f"Updated best-accuracy checkpoint at {best_path}")
+                    if (
+                        accuracy_metrics is not None
+                        and last_val_accuracy is not None
+                        and last_val_accuracy > previous_best_val_accuracy
+                    ):
+                        best_path = save_phase3_checkpoint(
+                            accelerator=accelerator,
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            output_dir=output_dir,
+                            optimizer_step=optimizer_step,
+                            global_step=global_step,
+                            checkpoint_name="phase3_best_accuracy.pt",
+                            backbone_start_block=backbone_start_block,
+                            checkpoint_metadata=checkpoint_metadata,
+                        )
+                        print_main(accelerator, f"Updated best-accuracy checkpoint at {best_path}")
 
-                if (
-                    eval_accuracy_every <= 0
-                    and ran_validation_loss
-                    and last_val_loss is not None
-                    and last_val_loss < previous_best_val_loss
-                ):
-                    best_path = save_phase3_checkpoint(
-                        accelerator=accelerator,
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        output_dir=output_dir,
-                        optimizer_step=optimizer_step,
-                        global_step=global_step,
-                        checkpoint_name="phase3_best_loss.pt",
-                        backbone_start_block=backbone_start_block,
-                        checkpoint_metadata=checkpoint_metadata,
-                    )
-                    print_main(accelerator, f"Updated best-loss checkpoint at {best_path}")
+                    if (
+                        eval_accuracy_every <= 0
+                        and ran_validation_loss
+                        and last_val_loss is not None
+                        and last_val_loss < previous_best_val_loss
+                    ):
+                        best_path = save_phase3_checkpoint(
+                            accelerator=accelerator,
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            output_dir=output_dir,
+                            optimizer_step=optimizer_step,
+                            global_step=global_step,
+                            checkpoint_name="phase3_best_loss.pt",
+                            backbone_start_block=backbone_start_block,
+                            checkpoint_metadata=checkpoint_metadata,
+                        )
+                        print_main(accelerator, f"Updated best-loss checkpoint at {best_path}")
 
-            if max_steps is not None and optimizer_step >= max_steps:
-                stop_training = True
+                if max_steps is not None and optimizer_step >= max_steps:
+                    stop_training = True
+                    break
+
+            if stop_training:
                 break
 
-        if stop_training:
-            break
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            final_checkpoint = save_phase3_checkpoint(
+                accelerator=accelerator,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                output_dir=output_dir,
+                optimizer_step=optimizer_step,
+                global_step=global_step,
+                checkpoint_name="phase3_final.pt",
+                backbone_start_block=backbone_start_block,
+                checkpoint_metadata={
+                    "stage": "phase3",
+                    "final_loss": last_train_loss,
+                    "final_val_loss": last_val_loss,
+                    "final_val_accuracy": last_val_accuracy,
+                    "best_val_loss": best_val_loss,
+                    "best_val_accuracy": best_val_accuracy,
+                },
+            )
+            print_main(accelerator, f"Saved final checkpoint to {final_checkpoint}")
+            print_main(accelerator, "Phase 3 training complete.")
+    except KeyboardInterrupt:
+        run_status = "interrupted"
+        interrupted = True
+        print_main(accelerator, "Phase 3 training interrupted by user.")
+    except Exception as exc:
+        run_status = "failed"
+        error_type = exc.__class__.__name__
+        error_message = str(exc)
+        raise
+    finally:
+        if wandb_run is not None:
+            if final_checkpoint is not None:
+                wandb_run.summary["final_checkpoint"] = str(final_checkpoint)
+            wandb_run.summary["best_val_loss"] = best_val_loss
+            wandb_run.summary["best_val_accuracy"] = best_val_accuracy
+            wandb_run.summary["run_status"] = run_status
+            wandb_run.finish()
 
-    accelerator.wait_for_everyone()
-    final_checkpoint = None
-    if accelerator.is_main_process:
-        final_checkpoint = save_phase3_checkpoint(
-            accelerator=accelerator,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
+        local_summary = collect_local_resource_summary(
+            stage="phase3",
+            run_name=run_name,
+            config_path=args.config,
             output_dir=output_dir,
+            device=accelerator.device,
+            rank=accelerator.process_index,
+            world_size=accelerator.num_processes,
+            status=run_status,
             optimizer_step=optimizer_step,
             global_step=global_step,
-            checkpoint_name="phase3_final.pt",
-            backbone_start_block=backbone_start_block,
-            checkpoint_metadata={
-                "stage": "phase3",
-                "final_loss": last_train_loss,
-                "final_val_loss": last_val_loss,
-                "final_val_accuracy": last_val_accuracy,
-                "best_val_loss": best_val_loss,
-                "best_val_accuracy": best_val_accuracy,
-            },
+            training_start_time=training_start_time,
+            interrupted=interrupted,
+            error_type=error_type,
+            error_message=error_message,
         )
-        print_main(accelerator, f"Saved final checkpoint to {final_checkpoint}")
-        print_main(accelerator, "Phase 3 training complete.")
-
-    if wandb_run is not None:
-        if final_checkpoint is not None:
-            wandb_run.summary["final_checkpoint"] = str(final_checkpoint)
-        wandb_run.summary["best_val_loss"] = best_val_loss
-        wandb_run.summary["best_val_accuracy"] = best_val_accuracy
-        wandb_run.finish()
+        write_local_resource_summary(output_dir, local_summary, rank=accelerator.process_index)
+        try_write_aggregate_resource_summary(output_dir, world_size=accelerator.num_processes)
 
 
 if __name__ == "__main__":

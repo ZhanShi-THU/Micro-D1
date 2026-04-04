@@ -9,7 +9,7 @@ from torch import nn
 from transformers import AutoConfig, AutoModelForImageTextToText, BitsAndBytesConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from models.adapter import VisualAdapter
+from models.adapter import build_visual_adapter
 from models.vision_encoder import VisionEncoder
 
 
@@ -72,6 +72,7 @@ class ModularVLM(nn.Module):
             backbone_name=vision_backbone,
             embed_dim_dino=embed_dim_dino,
             alignment_dim=alignment_dim,
+            alignment_head_type=model_cfg.get("alignment_head_type", "dinotxt"),
             alignment_head_weights=model_cfg.get("alignment_head_weights"),
             vision_source=model_cfg.get("vision_source", "torch_hub"),
             vision_repo=model_cfg.get("vision_repo", "facebookresearch/dinov3"),
@@ -79,7 +80,8 @@ class ModularVLM(nn.Module):
             vision_pretrained=model_cfg.get("vision_pretrained", True),
             vision_checkpoint_path=model_cfg.get("vision_checkpoint_path"),
         )
-        self.adapter = VisualAdapter(
+        self.adapter = build_visual_adapter(
+            adapter_type=str(model_cfg.get("adapter_type", "mlp")),
             input_dim=alignment_dim,
             output_dim=self.hidden_size_qwen,
             hidden_dim=int(model_cfg.get("adapter_hidden_dim", 2048)),

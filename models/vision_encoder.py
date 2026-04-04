@@ -144,6 +144,13 @@ class DINOTextAlignmentHead(nn.Module):
         return normalized_state
 
 
+class IdentityAlignmentHead(nn.Module):
+    """Pass-through alignment used for alignment ablations."""
+
+    def forward(self, visual_tokens: torch.Tensor) -> torch.Tensor:
+        return visual_tokens
+
+
 class VisionEncoder(nn.Module):
     """
     Vision-only encoder for the modular VLM.
@@ -159,6 +166,7 @@ class VisionEncoder(nn.Module):
         backbone_name: str,
         embed_dim_dino: int,
         alignment_dim: int,
+        alignment_head_type: str = "dinotxt",
         alignment_head_weights: Optional[str] = None,
         vision_source: str = "torch_hub",
         vision_repo: str = "facebookresearch/dinov3",
@@ -170,6 +178,7 @@ class VisionEncoder(nn.Module):
         self.backbone_name = backbone_name
         self.embed_dim_dino = embed_dim_dino
         self.alignment_dim = alignment_dim
+        self.alignment_head_type = str(alignment_head_type).strip().lower()
         if embed_dim_dino != alignment_dim:
             raise ValueError(
                 "The current dinotxt head expects equal DINO and alignment dimensions: "
@@ -187,18 +196,22 @@ class VisionEncoder(nn.Module):
             if not checkpoint_path.exists():
                 raise FileNotFoundError(f"Vision checkpoint not found: {vision_checkpoint_path}")
             self._load_backbone_checkpoint(checkpoint_path)
-        self.alignment_head = DINOTextAlignmentHead(
-            input_dim=embed_dim_dino,
-            output_dim=alignment_dim,
-        )
-
-        if alignment_head_weights:
-            checkpoint_path = Path(alignment_head_weights)
-            if not checkpoint_path.exists():
-                raise FileNotFoundError(
-                    f"dinotxt checkpoint not found: {alignment_head_weights}"
-                )
-            self.alignment_head.load_pretrained(str(checkpoint_path))
+        if self.alignment_head_type == "dinotxt":
+            self.alignment_head = DINOTextAlignmentHead(
+                input_dim=embed_dim_dino,
+                output_dim=alignment_dim,
+            )
+            if alignment_head_weights:
+                checkpoint_path = Path(alignment_head_weights)
+                if not checkpoint_path.exists():
+                    raise FileNotFoundError(
+                        f"dinotxt checkpoint not found: {alignment_head_weights}"
+                    )
+                self.alignment_head.load_pretrained(str(checkpoint_path))
+        elif self.alignment_head_type == "identity":
+            self.alignment_head = IdentityAlignmentHead()
+        else:
+            raise ValueError(f"Unsupported alignment_head_type: {alignment_head_type!r}")
 
     def _build_backbone(
         self,

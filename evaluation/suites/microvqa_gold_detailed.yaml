@@ -29,16 +29,16 @@ runs:
   - name: "phase2a_instruct"
     enabled: false
     config: "configs/phase2_qwen3_dinov3.yaml"
-    checkpoint: "/home/user/Project_files/project/outputs/phase2_qwen3_dinov3_qwen_hybrid_lora128/phase2_mixed_best.pt"
+    checkpoint: "/home/user/Project_files/project/outputs/phase2_qwen3_dinov3_qwen_hybrid_lora128/qwen3_dinov3_phase2_mixed_qwen_hybrid_lora128_mixed_20260402_044049/phase2_mixed_step_900.pt"
     prompt_style: "answer_only"
     image_preprocessing: "pad_preserve"
     image_size: 448
     max_text_length: 512
 
   - name: "phase2_mixed_qwen_hybrid_lora128"
-    enabled: true
+    enabled: false
     config: "configs/phase2_qwen3_dinov3_qwen_hybrid_lora128.yaml"
-    checkpoint: "/home/user/Project_files/project/outputs/phase2_qwen3_dinov3_qwen_hybrid_lora128/qwen3_dinov3_phase2_mixed_qwen_hybrid_lora128_mixed_20260327_213811/phase2_mixed_step_200.pt"
+    checkpoint: "/home/user/Project_files/project/outputs/phase2_qwen3_dinov3_qwen_hybrid_lora128/qwen3_dinov3_phase2_mixed_qwen_hybrid_lora128_mixed_20260401_220905/phase2_mixed_best.pt"
     prompt_style: "reasoning"
     image_preprocessing: "qwen_hybrid"
     dynamic_buckets: [384, 448, 512]
@@ -48,10 +48,12 @@ runs:
 
 
   - name: "phase3_final"
-    enabled: false
-    config: "configs/phase3_qwen3_dinov3.yaml"
-    checkpoint: "/home/user/Project_files/project/outputs/phase3_qwen3_dinov3/qwen3_dinov3_phase3_20260326_102419/phase3_step_220.pt"
+    enabled: true
+    config: "configs/phase3_qwen3_dinov3_qwen_hybrid_lora128.yaml"
+    checkpoint: "/home/user/Project_files/project/outputs/phase3_qwen3_dinov3_qwen_hybrid_lora128/qwen3_dinov3_phase3_reasoning_qwen_hybrid_lora128_conservative_20260402_123905/phase3_best_loss.pt"
     prompt_style: "reasoning"
-    image_preprocessing: "pad_preserve"
+    image_preprocessing: "qwen_hybrid"
+    dynamic_buckets: [384, 448, 512]
+    patch_size: 16
     image_size: 448
     max_text_length: 512

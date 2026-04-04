@@ -31,6 +31,7 @@ from data.unified_vqa import (
 )
 from models.generation import greedy_generate, parse_choice_answer
 from models.modular_vlm import ModularVLM
+from models.state_loading import load_matching_state_dict
 
 CAPTION_PROMPT = "Describe the image in one sentence with fine-grained details."
 
@@ -337,17 +338,37 @@ class ModularVLMEvaluator:
 
     def load_checkpoint(self, checkpoint_path: str) -> None:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        adapter_type = str(self.model.model_cfg.get("adapter_type", "mlp")).strip().lower()
+        alignment_head_type = str(
+            getattr(
+                self.model.vision_encoder,
+                "alignment_head_type",
+                self.model.model_cfg.get("alignment_head_type", "dinotxt"),
+            )
+        ).strip().lower()
         if "adapter" in checkpoint:
-            self.model.adapter.load_state_dict(checkpoint["adapter"], strict=True)
+            load_matching_state_dict(
+                self.model.adapter,
+                checkpoint["adapter"],
+                module_name="adapter",
+                strict=adapter_type == "mlp",
+            )
         elif "model" in checkpoint:
-            self.model.adapter.load_state_dict(checkpoint["model"], strict=True)
+            load_matching_state_dict(
+                self.model.adapter,
+                checkpoint["model"],
+                module_name="adapter",
+                strict=adapter_type == "mlp",
+            )
         else:
             raise KeyError("Checkpoint is missing 'adapter' or 'model' state.")
 
         if "vision_alignment_head" in checkpoint:
-            self.model.vision_encoder.alignment_head.load_state_dict(
+            load_matching_state_dict(
+                self.model.vision_encoder.alignment_head,
                 checkpoint["vision_alignment_head"],
-                strict=True,
+                module_name="vision_alignment_head",
+                strict=alignment_head_type == "dinotxt",
             )
 
         backbone_state = checkpoint.get("vision_backbone_top_blocks")

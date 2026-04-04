@@ -8,8 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Sequence
 
 
 REASONING_MULTIPLE_CHOICE_PROMPT_TEMPLATE = """The following is a multiple choice question (with answers) related to the image below.
-The option indices start from 0 and are shown explicitly as (0), (1), (2), ...
-Think step by step, use the option index exactly as shown, and then output the answer in the format of \"The answer is (X)\" at the end.
+The option indices start from 0. Think step by step, use the option index exactly as shown, and then output the answer in the format of \"The answer is (X)\" at the end.
 
 {question}
 
@@ -18,8 +17,7 @@ Options:
 """
 
 ANSWER_ONLY_MULTIPLE_CHOICE_PROMPT_TEMPLATE = """The following is a multiple choice question (with answers) related to the image below.
-The option indices start from 0 and are shown explicitly as (0), (1), (2), ...
-Answer using the option index exactly as shown in the format of \"The answer is (X)\".
+The option indices start from 0. Answer using the option index exactly as shown in the format of \"The answer is (X)\".
 
 {question}
 

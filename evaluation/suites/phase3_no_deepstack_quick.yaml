@@ -1,0 +1,25 @@
+suite_name: "phase3_no_deepstack_quick"
+output_root: "./eval_outputs/phase3_no_deepstack_quick"
+manifest: "/data1/staging_datasets/unified_vqa/manifests/by_split/microvqa_test.jsonl"
+device: "cuda"
+max_new_tokens: 500
+
+task_alias_map:
+  perception: "EU"
+  hypothesis_gen: "HG"
+  experiment_proposal: "EP"
+
+baseline:
+  enabled: false
+
+runs:
+  - name: "phase3_no_deepstack_quick"
+    enabled: true
+    config: "configs/ablations/phase3_component_ablation/phase3_qwen3_dinov3_qwen_hybrid_lora128_no_deepstack.yaml"
+    checkpoint: "/home/user/Project_files/project/outputs/phase3_qwen3_dinov3_qwen_hybrid_lora128/qwen3_dinov3_phase3_reasoning_qwen_hybrid_lora128_conservative_20260402_123905/phase3_step_200.pt"
+    prompt_style: "reasoning"
+    image_preprocessing: "qwen_hybrid"
+    dynamic_buckets: [384, 448, 512]
+    patch_size: 16
+    image_size: 448
+    max_text_length: 512

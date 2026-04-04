@@ -7,6 +7,7 @@ import math
 import multiprocessing as mp
 from pathlib import Path
 import sys
+import warnings
 from typing import Any, Dict, List, Mapping, Sequence
 
 import torch
@@ -41,7 +42,12 @@ DEFAULT_TASK_ALIAS_MAP = {
 CODE_VERSION_PATHS = (
     PROJECT_ROOT / "evaluation" / "run_microvqa_suite.py",
     PROJECT_ROOT / "evaluation" / "cli.py",
+    PROJECT_ROOT / "data" / "dataset.py",
+    PROJECT_ROOT / "data" / "unified_vqa.py",
+    PROJECT_ROOT / "models" / "adapter.py",
+    PROJECT_ROOT / "models" / "vision_encoder.py",
     PROJECT_ROOT / "models" / "modular_vlm.py",
+    PROJECT_ROOT / "models" / "state_loading.py",
     PROJECT_ROOT / "models" / "generation.py",
 )
 
@@ -873,4 +879,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Suppress multiprocessing resource_tracker warnings (harmless semapore leak warnings)
+    warnings.filterwarnings("ignore", category=UserWarning, module="multiprocessing.resource_tracker")
     main()

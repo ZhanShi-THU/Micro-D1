@@ -113,6 +113,60 @@ def test_resolve_stage_data_config_builds_mixed_dataset_specs() -> None:
     assert resolved["prompt_style"] == "answer_only"
 
 
+def test_resolve_stage_data_config_skips_zero_weight_datasets() -> None:
+    config = {
+        "data": {
+            "image_size": 448,
+            "max_text_length": 384,
+        },
+        "phase2": {
+            "datasets": [
+                {
+                    "name": "llava",
+                    "train_manifest": "/tmp/llava_train.jsonl",
+                    "sampling_weight": 0.0,
+                },
+                {
+                    "name": "scienceqa",
+                    "train_manifest": "/tmp/scienceqa_train.jsonl",
+                    "sampling_weight": 0.25,
+                },
+            ]
+        },
+    }
+    resolved = resolve_stage_data_config(config, "mixed")
+    assert len(resolved["mixture_datasets"]) == 1
+    assert resolved["mixture_datasets"][0]["name"] == "scienceqa"
+
+
+def test_resolve_stage_data_config_rejects_all_zero_weight_datasets() -> None:
+    config = {
+        "data": {
+            "image_size": 448,
+        },
+        "phase2": {
+            "datasets": [
+                {
+                    "name": "llava",
+                    "train_manifest": "/tmp/llava_train.jsonl",
+                    "sampling_weight": 0.0,
+                },
+                {
+                    "name": "scienceqa",
+                    "train_manifest": "/tmp/scienceqa_train.jsonl",
+                    "sampling_weight": 0.0,
+                },
+            ]
+        },
+    }
+    try:
+        resolve_stage_data_config(config, "mixed")
+    except ValueError as exc:
+        assert "at least one dataset with sampling_weight > 0" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError when all mixed datasets have zero weight.")
+
+
 def test_has_validation_data_detects_val_manifest() -> None:
     assert has_validation_data({"val_manifest": "/tmp/val.jsonl"}) is True
     assert has_validation_data({"val_manifest": None}) is False
@@ -171,6 +225,8 @@ if __name__ == "__main__":
     test_mixed_image_text_dataset_keeps_primary_full_and_adds_auxiliary_fraction()
     test_resolve_stage_data_config_prefers_stage_specific_values()
     test_resolve_stage_data_config_builds_mixed_dataset_specs()
+    test_resolve_stage_data_config_skips_zero_weight_datasets()
+    test_resolve_stage_data_config_rejects_all_zero_weight_datasets()
     test_has_validation_data_detects_val_manifest()
     test_has_validation_data_detects_mixed_val_manifest()
     test_weighted_multi_source_dataset_uses_requested_epoch_size()

@@ -28,6 +28,12 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 from data.dataset import ImageTextDataset
 from models.modular_vlm import ModularVLM
+from training.resource_tracking import (
+    collect_local_resource_summary,
+    reset_peak_memory_stats_for_device,
+    try_write_aggregate_resource_summary,
+    write_local_resource_summary,
+)
 
 try:
     import wandb
@@ -703,149 +709,186 @@ def main() -> None:
 
     global_step = start_step
     optimizer_step = 0
+    final_checkpoint = None
+    run_status = "completed"
+    interrupted = False
+    error_type: str | None = None
+    error_message: str | None = None
+    training_start_time = time.perf_counter()
+    reset_peak_memory_stats_for_device(device)
 
-    for epoch in range(num_epochs):
-        if is_distributed() and isinstance(dataloader.sampler, DistributedSampler):
-            dataloader.sampler.set_epoch(epoch)
-        print_main(f"[epoch] starting epoch {epoch + 1}/{num_epochs}")
-        for batch_idx, batch in enumerate(dataloader):
-            if max_steps is not None and optimizer_step >= max_steps:
-                break
+    try:
+        for epoch in range(num_epochs):
+            if is_distributed() and isinstance(dataloader.sampler, DistributedSampler):
+                dataloader.sampler.set_epoch(epoch)
+            print_main(f"[epoch] starting epoch {epoch + 1}/{num_epochs}")
+            for batch_idx, batch in enumerate(dataloader):
+                if max_steps is not None and optimizer_step >= max_steps:
+                    break
 
-            batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
+                batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
 
-            with torch.amp.autocast(
-                device_type=device.type,
-                dtype=autocast_dtype,
-                enabled=use_amp,
-            ):
-                outputs = model(**batch)
-                loss = outputs.loss
-                if loss is None:
-                    raise RuntimeError("Model forward pass did not return a loss tensor.")
-                loss = loss / grad_accum_steps
+                with torch.amp.autocast(
+                    device_type=device.type,
+                    dtype=autocast_dtype,
+                    enabled=use_amp,
+                ):
+                    outputs = model(**batch)
+                    loss = outputs.loss
+                    if loss is None:
+                        raise RuntimeError("Model forward pass did not return a loss tensor.")
+                    loss = loss / grad_accum_steps
 
-            if use_grad_scaler:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
+                if use_grad_scaler:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
-            global_step += 1
-            should_step = (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(dataloader)
-            if not should_step:
-                continue
+                global_step += 1
+                should_step = (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(dataloader)
+                if not should_step:
+                    continue
 
-            if use_grad_scaler:
-                scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                [param for param in model.parameters() if param.requires_grad],
-                max_grad_norm,
-            )
-
-            if use_grad_scaler:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
-            optimizer_step += 1
-
-            effective_loss = loss.detach().item() * grad_accum_steps
-            reduced_loss = maybe_reduce_scalar(effective_loss, device)
-            lr = scheduler.get_last_lr()[0]
-            if wandb_run is not None:
-                wandb.log(
-                    {
-                        "train/loss": reduced_loss,
-                        "train/lr": lr,
-                        "train/epoch": epoch,
-                        "train/global_step": global_step,
-                        "train/optimizer_step": optimizer_step,
-                    },
-                    step=optimizer_step,
+                if use_grad_scaler:
+                    scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    [param for param in model.parameters() if param.requires_grad],
+                    max_grad_norm,
                 )
 
-            if optimizer_step % log_every == 0:
-                log_record = {
-                    "epoch": epoch,
-                    "global_step": global_step,
-                    "optimizer_step": optimizer_step,
-                    "loss": reduced_loss,
-                    "lr": lr,
-                }
-                if is_main_process():
-                    append_train_log(log_path, log_record)
-                print_main(
-                    f"epoch={epoch} step={optimizer_step} "
-                    f"loss={reduced_loss:.4f} lr={lr:.6e}"
-                )
+                if use_grad_scaler:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
 
-            if val_dataloader is not None and eval_every > 0 and optimizer_step % eval_every == 0:
-                metrics = evaluate_loss(
-                    model=model,
-                    dataloader=val_dataloader,
-                    device=device,
-                    mixed_precision=str(train_cfg.get("mixed_precision", "none")),
-                    max_batches=eval_max_batches,
-                )
-                val_loss = metrics["loss"]
-                val_record = {
-                    "epoch": epoch,
-                    "global_step": global_step,
-                    "optimizer_step": optimizer_step,
-                    "val_loss": val_loss,
-                    "val_num_batches": metrics["num_batches"],
-                }
-                if is_main_process():
-                    append_train_log(log_path, val_record)
-                print_main(
-                    f"[validation] epoch={epoch} step={optimizer_step} "
-                    f"val_loss={val_loss:.4f} "
-                    f"batches={int(metrics['num_batches'])}"
-                )
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                optimizer_step += 1
+
+                effective_loss = loss.detach().item() * grad_accum_steps
+                reduced_loss = maybe_reduce_scalar(effective_loss, device)
+                lr = scheduler.get_last_lr()[0]
                 if wandb_run is not None:
                     wandb.log(
                         {
-                            "val/loss": val_loss,
-                            "val/epoch": epoch,
-                            "val/global_step": global_step,
-                            "val/optimizer_step": optimizer_step,
-                            "val/num_batches": metrics["num_batches"],
+                            "train/loss": reduced_loss,
+                            "train/lr": lr,
+                            "train/epoch": epoch,
+                            "train/global_step": global_step,
+                            "train/optimizer_step": optimizer_step,
                         },
                         step=optimizer_step,
                     )
 
-            if save_every > 0 and optimizer_step % save_every == 0 and is_main_process():
-                checkpoint_path = save_adapter_checkpoint(
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    output_dir=output_dir,
-                    step=optimizer_step,
-                )
-                print_main(f"Saved checkpoint to {checkpoint_path}")
+                if optimizer_step % log_every == 0:
+                    log_record = {
+                        "epoch": epoch,
+                        "global_step": global_step,
+                        "optimizer_step": optimizer_step,
+                        "loss": reduced_loss,
+                        "lr": lr,
+                    }
+                    if is_main_process():
+                        append_train_log(log_path, log_record)
+                    print_main(
+                        f"epoch={epoch} step={optimizer_step} "
+                        f"loss={reduced_loss:.4f} lr={lr:.6e}"
+                    )
 
-        if max_steps is not None and optimizer_step >= max_steps:
-            break
+                if val_dataloader is not None and eval_every > 0 and optimizer_step % eval_every == 0:
+                    metrics = evaluate_loss(
+                        model=model,
+                        dataloader=val_dataloader,
+                        device=device,
+                        mixed_precision=str(train_cfg.get("mixed_precision", "none")),
+                        max_batches=eval_max_batches,
+                    )
+                    val_loss = metrics["loss"]
+                    val_record = {
+                        "epoch": epoch,
+                        "global_step": global_step,
+                        "optimizer_step": optimizer_step,
+                        "val_loss": val_loss,
+                        "val_num_batches": metrics["num_batches"],
+                    }
+                    if is_main_process():
+                        append_train_log(log_path, val_record)
+                    print_main(
+                        f"[validation] epoch={epoch} step={optimizer_step} "
+                        f"val_loss={val_loss:.4f} "
+                        f"batches={int(metrics['num_batches'])}"
+                    )
+                    if wandb_run is not None:
+                        wandb.log(
+                            {
+                                "val/loss": val_loss,
+                                "val/epoch": epoch,
+                                "val/global_step": global_step,
+                                "val/optimizer_step": optimizer_step,
+                                "val/num_batches": metrics["num_batches"],
+                            },
+                            step=optimizer_step,
+                        )
 
-    final_checkpoint = None
-    if is_main_process():
-        final_checkpoint = save_adapter_checkpoint(
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
+                if save_every > 0 and optimizer_step % save_every == 0 and is_main_process():
+                    checkpoint_path = save_adapter_checkpoint(
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        output_dir=output_dir,
+                        step=optimizer_step,
+                    )
+                    print_main(f"Saved checkpoint to {checkpoint_path}")
+
+            if max_steps is not None and optimizer_step >= max_steps:
+                break
+
+        if is_main_process():
+            final_checkpoint = save_adapter_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                output_dir=output_dir,
+                step=optimizer_step,
+            )
+            print_main(f"Saved final checkpoint to {final_checkpoint}")
+            print_main("Training complete.")
+    except KeyboardInterrupt:
+        run_status = "interrupted"
+        interrupted = True
+        print_main("Training interrupted by user.")
+    except Exception as exc:
+        run_status = "failed"
+        error_type = exc.__class__.__name__
+        error_message = str(exc)
+        raise
+    finally:
+        if wandb_run is not None:
+            if final_checkpoint is not None:
+                wandb_run.summary["final_checkpoint"] = str(final_checkpoint)
+            wandb_run.summary["run_status"] = run_status
+            wandb_run.finish()
+
+        local_summary = collect_local_resource_summary(
+            stage="phase1",
+            run_name=run_name,
+            config_path=args.config,
             output_dir=output_dir,
-            step=optimizer_step,
+            device=device,
+            rank=get_rank(),
+            world_size=get_world_size(),
+            status=run_status,
+            optimizer_step=optimizer_step,
+            global_step=global_step,
+            training_start_time=training_start_time,
+            interrupted=interrupted,
+            error_type=error_type,
+            error_message=error_message,
         )
-        print_main(f"Saved final checkpoint to {final_checkpoint}")
-        print_main("Training complete.")
-    if wandb_run is not None:
-        if final_checkpoint is not None:
-            wandb_run.summary["final_checkpoint"] = str(final_checkpoint)
-        wandb_run.finish()
-    cleanup_distributed()
+        write_local_resource_summary(output_dir, local_summary, rank=get_rank())
+        try_write_aggregate_resource_summary(output_dir, world_size=get_world_size())
+        cleanup_distributed()
 
 
 if __name__ == "__main__":

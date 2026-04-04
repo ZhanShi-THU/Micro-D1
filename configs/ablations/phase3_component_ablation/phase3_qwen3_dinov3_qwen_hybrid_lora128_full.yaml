@@ -1,0 +1,95 @@
+project_name: phase3_component_ablation_full
+seed: 42
+model:
+  vision_backbone: dinov3_vitl16
+  vision_source: torch_hub
+  vision_repo: facebookresearch/dinov3
+  vision_model_name: dinov3_vitl16
+  vision_pretrained: false
+  vision_checkpoint_path: /home/user/Project_files/project/pth/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
+  alignment_head_weights: /home/user/Project_files/project/pth/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth
+  llm_base: /home/user/Project_files/project/local_models/qwen3-vl-8b
+  llm_quantization: 4bit
+  llm_quant_compute_dtype: bf16
+  llm_quant_double_quant: true
+  llm_quant_type: nf4
+  embed_dim_dino: 1024
+  alignment_dim: 1024
+  hidden_size_qwen: 4096
+  adapter_hidden_dim: 2048
+  adapter_dropout: 0.0
+  use_deepstack_injection: true
+  deepstack_num_layers: 4
+  alignment_head_type: dinotxt
+  adapter_type: mlp
+  ablation_variant: full
+phase3:
+  resume_from_phase2_checkpoint: null
+  backbone_train_start_block: 22
+  lora:
+    enabled: true
+    r: 128
+    lora_alpha: 256
+    lora_dropout: 0.05
+    target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    bias: none
+  learning_rates:
+    vision_backbone_top_blocks: 5.0e-07
+    vision_alignment_head: 2.0e-06
+    adapter: 1.0e-05
+    llm_lora: 6.0e-06
+  weight_decay: 0.01
+data:
+  train_manifest: /data1/staging_datasets/phase3_reasoning/mmsci_reasoning/train.jsonl
+  val_manifest: /data1/staging_datasets/phase3_reasoning/mmsci_reasoning/val.jsonl
+  image_root: null
+  val_image_root: null
+  image_size: 448
+  image_preprocessing: qwen_hybrid
+  dynamic_buckets:
+  - 384
+  - 448
+  - 512
+  patch_size: 16
+  dynamic_batch_padding: true
+  max_text_length: 512
+  prompt_style: reasoning
+  num_workers: 4
+training:
+  output_dir: ./outputs/phase3_qwen3_dinov3_qwen_hybrid_lora128
+  use_run_subdir: true
+  run_name: phase3_component_ablation_full
+  batch_size: 1
+  eval_batch_size: 1
+  num_epochs: 1
+  max_steps: 600
+  warmup_steps: 50
+  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0
+  mixed_precision: bf16
+  gradient_checkpointing: true
+  log_every: 10
+  eval_every: 10
+  eval_accuracy_every: 0
+  eval_max_batches: 64
+  eval_accuracy_max_samples: 64
+  eval_max_new_tokens: 64
+  save_every: 100
+  save_steps: []
+  wandb:
+    enabled: true
+    project: microvqa
+    entity: null
+    name: phase3_component_ablation_full
+    mode: null
+    tags:
+    - phase3
+    - reasoning_only
+    - mmsci_reasoning
+    - qwen_hybrid
+    - lora128
+    - conservative

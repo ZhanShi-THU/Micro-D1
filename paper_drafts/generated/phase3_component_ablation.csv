@@ -1,0 +1,5 @@
+variant_key,model_variant,summary_path,EU,HG,EP,Avg
+full,Full Model (Micro-D1),/home/user/Project_files/project/eval_outputs/phase3_component_ablation/full/summary.json,,,,
+no_deepstack,w/o DeepStack,/home/user/Project_files/project/eval_outputs/phase3_component_ablation/no_deepstack/summary.json,,,,
+no_alignment,w/o alignment head (dino-txt),/home/user/Project_files/project/eval_outputs/phase3_component_ablation/no_alignment/summary.json,,,,
+linear_adapter,w/o adapter (linear),/home/user/Project_files/project/eval_outputs/phase3_component_ablation/linear_adapter/summary.json,,,,
