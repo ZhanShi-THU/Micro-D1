@@ -1,4 +1,4 @@
-project_name: "llava_pretrain_adapter_warmup"
+project_name: "llava_pretrain_adapter_warmup_linear"
 seed: 42
 
 model:
@@ -20,6 +20,8 @@ model:
   use_deepstack_injection: false
   deepstack_num_layers: 4
   adapter_dropout: 0.0
+  alignment_head_type: "dinotxt"
+  adapter_type: "linear"
 
 data:
   train_manifest: "/data1/LLaVA-Pretrain/phase1/pretrain.jsonl"
@@ -27,13 +29,13 @@ data:
   image_root: null
   val_image_root: null
   image_size: 336
-  max_text_length: 550
+  max_text_length: 520
   num_workers: 8
 
 training:
-  output_dir: "./outputs/pretrain_llava"
+  output_dir: "./outputs/pretrain_llava_linear"
   use_run_subdir: false
-  run_name: "pretrain_llava"
+  run_name: "pretrain_llava_linear"
   stable_checkpoint_name: "adapter_checkpoint_phase1.pt"
   batch_size: 1
   num_epochs: 1
@@ -47,7 +49,7 @@ training:
   eval_every: 200
   eval_max_batches: 64
   eval_batch_size: 1
-  save_every: 1000
+  save_every: 500
   device: "cuda"
   wandb:
     enabled: true
@@ -58,3 +60,4 @@ training:
     tags:
       - "phase1"
       - "llava-pretrain"
+      - "linear_adapter"

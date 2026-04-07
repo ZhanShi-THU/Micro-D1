@@ -1,13 +1,22 @@
+# Core training / inference
 torch
 torchvision
 transformers>=4.50.0
 huggingface_hub>=0.36.0
-datasets
 accelerate
-bitsandbytes
 peft
+bitsandbytes
+datasets
+
+# Data / configs
+numpy
 PyYAML
 Pillow
-torchmetrics
-numpy
+
+# Logging / utilities
+wandb
 termcolor
+torchmetrics
+
+# Local testing
+pytest

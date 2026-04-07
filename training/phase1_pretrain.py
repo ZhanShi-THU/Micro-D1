@@ -13,8 +13,14 @@ import math
 import random
 import time
 import os
+import shutil
 from pathlib import Path
+import sys
 from typing import Any, Dict, List
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import torch
@@ -467,6 +473,8 @@ def save_adapter_checkpoint(
     scheduler,
     output_dir: Path,
     step: int,
+    checkpoint_name: str | None = None,
+    checkpoint_metadata: Dict[str, Any] | None = None,
 ) -> Path:
     unwrap_model = model.module if isinstance(model, DDP) else model
     checkpoint = {
@@ -475,9 +483,28 @@ def save_adapter_checkpoint(
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
     }
-    checkpoint_path = output_dir / f"adapter_step_{step}.pt"
+    if checkpoint_metadata is not None:
+        checkpoint["checkpoint_metadata"] = checkpoint_metadata
+    checkpoint_path = output_dir / (checkpoint_name or f"adapter_step_{step}.pt")
     torch.save(checkpoint, checkpoint_path)
     return checkpoint_path
+
+
+def maybe_write_stable_checkpoint_alias(
+    output_dir: Path,
+    source_checkpoint: Path | None,
+    config: Dict[str, Any],
+) -> Path | None:
+    if source_checkpoint is None:
+        return None
+
+    stable_name = str(config.get("training", {}).get("stable_checkpoint_name", "")).strip()
+    if not stable_name:
+        return None
+
+    stable_path = output_dir / stable_name
+    shutil.copy2(source_checkpoint, stable_path)
+    return stable_path
 
 
 def append_train_log(log_path: Path, payload: Dict[str, Any]) -> None:
@@ -635,12 +662,15 @@ def main() -> None:
         )
 
     start_step = 0
+    resumed_best_val_loss = float("inf")
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
         unwrap_model = model.module if isinstance(model, DDP) else model
         unwrap_model.adapter.load_state_dict(ckpt["adapter"])
         if "global_step" in ckpt:
             start_step = ckpt["global_step"]
+        checkpoint_metadata = ckpt.get("checkpoint_metadata") or {}
+        resumed_best_val_loss = float(checkpoint_metadata.get("best_val_loss", resumed_best_val_loss))
         print_main(f"Resumed from step {start_step}")
 
     print_main("Trainable parameters:")
@@ -709,6 +739,9 @@ def main() -> None:
 
     global_step = start_step
     optimizer_step = 0
+    best_val_loss = resumed_best_val_loss
+    best_checkpoint_path: Path | None = None
+    last_val_loss: float | None = None
     final_checkpoint = None
     run_status = "completed"
     interrupted = False
@@ -718,7 +751,9 @@ def main() -> None:
     reset_peak_memory_stats_for_device(device)
 
     try:
+        current_epoch = 0
         for epoch in range(num_epochs):
+            current_epoch = epoch
             if is_distributed() and isinstance(dataloader.sampler, DistributedSampler):
                 dataloader.sampler.set_epoch(epoch)
             print_main(f"[epoch] starting epoch {epoch + 1}/{num_epochs}")
@@ -805,11 +840,15 @@ def main() -> None:
                         max_batches=eval_max_batches,
                     )
                     val_loss = metrics["loss"]
+                    previous_best_val_loss = best_val_loss
+                    best_val_loss = min(best_val_loss, val_loss)
+                    last_val_loss = val_loss
                     val_record = {
                         "epoch": epoch,
                         "global_step": global_step,
                         "optimizer_step": optimizer_step,
                         "val_loss": val_loss,
+                        "best_val_loss": best_val_loss,
                         "val_num_batches": metrics["num_batches"],
                     }
                     if is_main_process():
@@ -817,12 +856,14 @@ def main() -> None:
                     print_main(
                         f"[validation] epoch={epoch} step={optimizer_step} "
                         f"val_loss={val_loss:.4f} "
+                        f"best_val_loss={best_val_loss:.4f} "
                         f"batches={int(metrics['num_batches'])}"
                     )
                     if wandb_run is not None:
                         wandb.log(
                             {
                                 "val/loss": val_loss,
+                                "val/best_loss": best_val_loss,
                                 "val/epoch": epoch,
                                 "val/global_step": global_step,
                                 "val/optimizer_step": optimizer_step,
@@ -831,6 +872,24 @@ def main() -> None:
                             step=optimizer_step,
                         )
 
+                    if is_main_process() and val_loss < previous_best_val_loss:
+                        best_checkpoint_path = save_adapter_checkpoint(
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            output_dir=output_dir,
+                            step=optimizer_step,
+                            checkpoint_name="adapter_best_loss.pt",
+                            checkpoint_metadata={
+                                "best_val_loss": best_val_loss,
+                                "val_loss": val_loss,
+                                "optimizer_step": optimizer_step,
+                                "global_step": global_step,
+                                "epoch": epoch,
+                            },
+                        )
+                        print_main(f"Saved best validation checkpoint to {best_checkpoint_path}")
+
                 if save_every > 0 and optimizer_step % save_every == 0 and is_main_process():
                     checkpoint_path = save_adapter_checkpoint(
                         model=model,
@@ -838,6 +897,13 @@ def main() -> None:
                         scheduler=scheduler,
                         output_dir=output_dir,
                         step=optimizer_step,
+                        checkpoint_metadata={
+                            "best_val_loss": best_val_loss,
+                            "last_val_loss": last_val_loss,
+                            "optimizer_step": optimizer_step,
+                            "global_step": global_step,
+                            "epoch": epoch,
+                        },
                     )
                     print_main(f"Saved checkpoint to {checkpoint_path}")
 
@@ -851,8 +917,23 @@ def main() -> None:
                 scheduler=scheduler,
                 output_dir=output_dir,
                 step=optimizer_step,
+                checkpoint_metadata={
+                    "best_val_loss": best_val_loss,
+                    "last_val_loss": last_val_loss,
+                    "optimizer_step": optimizer_step,
+                    "global_step": global_step,
+                    "epoch": current_epoch,
+                },
             )
             print_main(f"Saved final checkpoint to {final_checkpoint}")
+            stable_source = best_checkpoint_path or final_checkpoint
+            stable_checkpoint = maybe_write_stable_checkpoint_alias(
+                output_dir=output_dir,
+                source_checkpoint=stable_source,
+                config=config,
+            )
+            if stable_checkpoint is not None:
+                print_main(f"Updated stable checkpoint alias at {stable_checkpoint}")
             print_main("Training complete.")
     except KeyboardInterrupt:
         run_status = "interrupted"
@@ -867,6 +948,10 @@ def main() -> None:
         if wandb_run is not None:
             if final_checkpoint is not None:
                 wandb_run.summary["final_checkpoint"] = str(final_checkpoint)
+            if best_checkpoint_path is not None:
+                wandb_run.summary["best_checkpoint"] = str(best_checkpoint_path)
+            if best_val_loss < float("inf"):
+                wandb_run.summary["best_val_loss"] = best_val_loss
             wandb_run.summary["run_status"] = run_status
             wandb_run.finish()
 

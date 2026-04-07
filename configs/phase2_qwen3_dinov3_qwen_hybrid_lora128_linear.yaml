@@ -1,0 +1,114 @@
+project_name: "qwen3_dinov3_phase2_mixed_qwen_hybrid_lora128_linear"
+seed: 42
+
+model:
+  vision_backbone: "dinov3_vitl16"
+  vision_source: "torch_hub"
+  vision_repo: "facebookresearch/dinov3"
+  vision_model_name: "dinov3_vitl16"
+  vision_pretrained: false
+  vision_checkpoint_path: "/home/user/Project_files/project/pth/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+  alignment_head_weights: "/home/user/Project_files/project/pth/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth"
+  llm_base: "/home/user/Project_files/project/local_models/qwen3-vl-8b"
+  llm_quantization: "4bit"
+  llm_quant_compute_dtype: "bf16"
+  llm_quant_double_quant: true
+  llm_quant_type: "nf4"
+  embed_dim_dino: 1024
+  alignment_dim: 1024
+  hidden_size_qwen: 4096
+  adapter_hidden_dim: 2048
+  adapter_dropout: 0.0
+  use_deepstack_injection: true
+  deepstack_num_layers: 4
+  alignment_head_type: "dinotxt"
+  adapter_type: "linear"
+  adapter_init_checkpoint: "/home/user/Project_files/project/outputs/pretrain_llava_linear/adapter_checkpoint_phase1.pt"
+
+phase2:
+  stage: "mixed"
+  resume_from_phase2_checkpoint: null
+  mixed_samples_per_epoch: 560000
+  lora:
+    enabled: true
+    r: 128
+    lora_alpha: 256
+    lora_dropout: 0.05
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+    bias: "none"
+  learning_rates:
+    vision_alignment_head: 1.0e-5
+    adapter: 5.0e-5
+    llm_lora: 2.0e-5
+  weight_decay: 0.01
+  datasets:
+    - name: "llava_instruct"
+      train_manifest: "/data1/staging_datasets/phase2/llava_instruct_150k/train.jsonl"
+      val_manifest: "/data1/staging_datasets/phase2/llava_instruct_150k/train_val.jsonl"
+      image_root: null
+      val_image_root: null
+      sampling_weight: 0.55
+    - name: "vqav2"
+      train_manifest: "/data1/staging_datasets/phase2/vqav2/train.jsonl"
+      val_manifest: "/data1/staging_datasets/phase2/vqav2/train_val.jsonl"
+      image_root: null
+      val_image_root: null
+      sampling_weight: 0.2
+    - name: "scienceqa"
+      train_manifest: "/data1/staging_datasets/phase2/scienceqa/train.jsonl"
+      val_manifest: "/data1/staging_datasets/phase2/scienceqa/val.jsonl"
+      image_root: null
+      val_image_root: null
+      sampling_weight: 0.25
+
+data:
+  image_root: null
+  val_image_root: null
+  image_size: 448
+  image_preprocessing: "qwen_hybrid"
+  dynamic_buckets: [384, 448, 512]
+  patch_size: 16
+  dynamic_batch_padding: true
+  max_text_length: 384
+  prompt_style: "answer_only"
+  num_workers: 8
+
+training:
+  output_dir: "./outputs/phase2_qwen3_dinov3_qwen_hybrid_lora128"
+  use_run_subdir: true
+  run_name: null
+  batch_size: 1
+  num_epochs: 1
+  max_steps: null
+  warmup_steps: 500
+  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0
+  mixed_precision: "bf16"
+  gradient_checkpointing: true
+  log_every: 10
+  eval_every: 5
+  eval_max_batches: 64
+  eval_batch_size: 1
+  save_every: 100
+  save_steps: []
+  best_checkpoint_min_loss: 2.5
+  save_loss_thresholds: []
+  device: "cuda"
+  wandb:
+    enabled: true
+    project: "microvqa"
+    entity: null
+    name: null
+    mode: null
+    tags:
+      - "phase2"
+      - "qlora"
+      - "qwen_hybrid"
+      - "lora128"
+      - "mixed"
+      - "linear_adapter"
+      - "llava_vqav2_scienceqa"
